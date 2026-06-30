@@ -252,7 +252,7 @@ Format clearly with each member's name bolded."""
                 "tools": [{"type": "web_search_20250305", "name": "web_search"}],
                 "messages": [{"role": "user", "content": prompt}]
             },
-            timeout=60
+            timeout=150
         )
         data = response.json()
         text_blocks = [b["text"] for b in data.get("content", []) if b.get("type") == "text"]
