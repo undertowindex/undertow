@@ -317,7 +317,7 @@ Be specific. No waffle."""
 # ─────────────────────────────────────────────
 # LAYER 7: EMAIL via RESEND
 # ─────────────────────────────────────────────
-def send_email(score_data, l1, l2, l3, boardroom, trade_ideas):
+def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html=""):
     if not RESEND_API_KEY:
         print("No Resend key — skipping email.")
         return
@@ -353,6 +353,10 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas):
 <div style="background: #1a1a1a; padding: 15px; border-radius: 4px; white-space: pre-wrap; line-height: 1.6;">
 {trade_ideas}
 </div>
+<h3 style="color: #f0c040;">📊 IBKR Portfolio</h3>
+<div style="background: #1a1a1a; padding: 15px; border-radius: 4px; white-space: pre-wrap; line-height: 1.6; font-family: monospace; font-size: 13px;">
+{layer8_html}
+</div>
 <hr style="border-color: #333; margin-top: 30px;">
 <p style="color: #555; font-size: 12px;">Undertow Index — automated macro intelligence. Not financial advice.</p>
 </body></html>
@@ -383,6 +387,211 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas):
 # ─────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────
+# ─────────────────────────────────────────────
+# LAYER 8: IBKR PORTFOLIO AWARENESS
+# ─────────────────────────────────────────────
+import time
+import xml.etree.ElementTree as ET
+
+IBKR_TOKEN = os.environ.get("IBKR_TOKEN")
+IBKR_QUERY_ID = os.environ.get("IBKR_QUERY_ID")
+
+def get_layer8():
+    """
+    Pulls current IBKR positions via Flex Web Service.
+    Two-step flow: (1) request report generation, (2) poll/retrieve the XML.
+    Returns dict with positions list, flags, and summary data.
+    """
+    if not IBKR_TOKEN or not IBKR_QUERY_ID:
+        return {
+            "available": False,
+            "error": "IBKR_TOKEN or IBKR_QUERY_ID not set in environment.",
+            "positions": [],
+            "flags": []
+        }
+
+    try:
+        # STEP 1: Request report generation
+        send_url = (
+            f"https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService/SendRequest"
+            f"?t={IBKR_TOKEN}&q={IBKR_QUERY_ID}&v=3"
+        )
+        send_resp = requests.get(send_url, timeout=30)
+        send_root = ET.fromstring(send_resp.text)
+
+        status = send_root.attrib.get("status") or send_root.findtext("Status")
+        if status != "Success":
+            error_msg = send_root.findtext("ErrorMessage") or "Unknown error requesting Flex report."
+            return {
+                "available": False,
+                "error": f"Flex request failed: {error_msg}",
+                "positions": [],
+                "flags": []
+            }
+
+        reference_code = send_root.findtext("ReferenceCode")
+        if not reference_code:
+            return {
+                "available": False,
+                "error": "No ReferenceCode returned from IBKR.",
+                "positions": [],
+                "flags": []
+            }
+
+        # STEP 2: Poll for the report — IBKR needs a few seconds to generate it
+        get_url = (
+            f"https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService/GetStatement"
+            f"?t={IBKR_TOKEN}&q={reference_code}&v=3"
+        )
+
+        report_xml = None
+        max_attempts = 15
+        for attempt in range(max_attempts):
+            time.sleep(5)  # give IBKR time to generate the report
+            get_resp = requests.get(get_url, timeout=30)
+
+            # If the report isn't ready, IBKR returns a small XML with status "Warn"/"Fail"
+            # If it IS ready, IBKR returns the full FlexQueryResponse XML (much larger)
+            if "<FlexQueryResponse" in get_resp.text:
+                report_xml = get_resp.text
+                break
+            else:
+                # Check if it's a genuine error vs "still generating"
+                try:
+                    err_root = ET.fromstring(get_resp.text)
+                    err_status = err_root.attrib.get("status") or err_root.findtext("Status")
+                    if err_status == "Fail":
+                        error_msg = err_root.findtext("ErrorMessage") or "Unknown error retrieving report."
+                        return {
+                            "available": False,
+                            "error": f"Flex retrieval failed: {error_msg}",
+                            "positions": [],
+                            "flags": []
+                        }
+                except ET.ParseError:
+                    pass
+                continue
+
+        if not report_xml:
+            return {
+                "available": False,
+                "error": "Report did not become ready in time (timed out after 30s polling).",
+                "positions": [],
+                "flags": []
+            }
+
+        # STEP 3: Parse the actual positions XML
+        root = ET.fromstring(report_xml)
+        positions = []
+        flags = []
+
+        for pos in root.iter("OpenPosition"):
+            symbol = pos.attrib.get("symbol", "")
+            description = pos.attrib.get("description", "")
+            asset_class = pos.attrib.get("assetCategory", "")
+            currency = pos.attrib.get("currency", "")
+            quantity = float(pos.attrib.get("position", 0) or 0)
+            mark_price = float(pos.attrib.get("markPrice", 0) or 0)
+            position_value = float(pos.attrib.get("positionValue", 0) or 0)
+            open_price = float(pos.attrib.get("openPrice", 0) or 0)
+            pct_nav = float(pos.attrib.get("percentOfNAV", 0) or 0)
+            unrealized_pl = float(pos.attrib.get("fifoPnlUnrealized", 0) or 0)
+            strike = pos.attrib.get("strike", "")
+            expiry = pos.attrib.get("expiry", "")
+            put_call = pos.attrib.get("putCall", "")
+
+            entry = {
+                "symbol": symbol,
+                "description": description,
+                "asset_class": asset_class,
+                "currency": currency,
+                "quantity": quantity,
+                "mark_price": mark_price,
+                "position_value": position_value,
+                "open_price": open_price,
+                "pct_nav": pct_nav,
+                "unrealized_pl": unrealized_pl,
+                "strike": strike,
+                "expiry": expiry,
+                "put_call": put_call,
+            }
+            positions.append(entry)
+
+            # ── RISK FLAGS ──
+            # Concentration: any single position over 15% of NAV
+            if abs(pct_nav) > 15:
+                flags.append(
+                    f"⚠️ {symbol} is {pct_nav:.1f}% of NAV — concentration risk"
+                )
+
+            # Drawdown: unrealized loss greater than 10% of position value
+            if open_price > 0 and mark_price > 0:
+                pct_move = ((mark_price - open_price) / open_price) * 100
+                if pct_move < -10:
+                    flags.append(
+                        f"⚠️ {symbol} is down {abs(pct_move):.1f}% from entry (mark {mark_price} vs open {open_price})"
+                    )
+
+        # Sort positions by absolute position value, largest first
+        positions.sort(key=lambda p: abs(p["position_value"]), reverse=True)
+
+        return {
+            "available": True,
+            "error": None,
+            "positions": positions,
+            "flags": flags,
+            "total_positions": len(positions)
+        }
+
+    except Exception as e:
+        return {
+            "available": False,
+            "error": f"Layer 8 error: {e}",
+            "positions": [],
+            "flags": []
+        }
+
+
+def format_layer8_for_email(layer8_data):
+    """
+    Formats Layer 8 output into a clean text block for the email report.
+    """
+    if not layer8_data["available"]:
+        return f"📊 IBKR Portfolio: unavailable ({layer8_data['error']})"
+
+    positions = layer8_data["positions"]
+    flags = layer8_data["flags"]
+
+    if not positions:
+        return "📊 IBKR Portfolio: no open positions found."
+
+    lines = ["📊 IBKR PORTFOLIO — CURRENT POSITIONS", ""]
+
+    for p in positions:
+        symbol_display = p["symbol"]
+        if p["asset_class"] == "OPT" and p["strike"] and p["expiry"]:
+            symbol_display += f" {p['strike']}{p['put_call']} {p['expiry']}"
+
+        pl_sign = "+" if p["unrealized_pl"] >= 0 else ""
+        lines.append(
+            f"  {symbol_display:<25} {p['asset_class']:<6} "
+            f"Qty: {p['quantity']:>10.2f}  "
+            f"Value: {p['currency']} {p['position_value']:>12,.2f}  "
+            f"% NAV: {p['pct_nav']:>5.1f}%  "
+            f"P/L: {pl_sign}{p['unrealized_pl']:,.2f}"
+        )
+
+    lines.append("")
+    if flags:
+        lines.append("⚡ Portfolio Flags:")
+        for f in flags:
+            lines.append(f"  {f}")
+    else:
+        lines.append("✅ No concentration or drawdown flags.")
+
+    return "\n".join(lines)
+
+
 def main():
     print("=" * 60)
     print("UNDERTOW INDEX — RUNNING")
@@ -416,8 +625,13 @@ def main():
     trade_ideas = get_trade_ideas(score_data, l1, l2, l3)
     print(trade_ideas)
 
+    print("\n[Layer 8] Pulling IBKR portfolio...")
+    layer8_data = get_layer8()
+    layer8_html = format_layer8_for_email(layer8_data)
+    print(layer8_html)
+
     print("\n[Layer 7] Sending email report...")
-    send_email(score_data, l1, l2, l3, boardroom, trade_ideas)
+    send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html)
 
     print("\n" + "=" * 60)
     print("UNDERTOW INDEX — COMPLETE")
