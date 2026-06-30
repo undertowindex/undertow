@@ -214,13 +214,18 @@ LIVING MASTERS:
 5. Howard Marks — risk assessment, market psychology
 6. Paul Tudor Jones — technical macro, crisis anticipation
 7. Jeffrey Gundlach — fixed income, macro flows
+8. Lee Robinson — event-driven macro, credit dislocations
+9. Nassim Taleb — tail risk, fragility, black swans
+10. Jim Rogers — global commodities, long-cycle macro
+11. George Soros — reflexivity, currency macro bets
+12. Jim Simons — quantitative pattern detection
 
 HISTORICAL GHOSTS:
-8. Jesse Livermore — tape reading, market psychology
-9. Benjamin Graham — margin of safety, intrinsic value
-10. Sir John Templeton — contrarian global value
-11. Charlie Munger — mental models, concentrated bets
-12. André Kostolany — European macro, sentiment cycles
+13. Jesse Livermore — tape reading, market psychology
+14. Benjamin Graham — margin of safety, intrinsic value
+15. Sir John Templeton — contrarian global value
+16. Charlie Munger — mental models, concentrated bets
+17. André Kostolany — European macro, sentiment cycles
 
 Each member should give:
 - A 1-2 sentence view in their authentic voice
