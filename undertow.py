@@ -270,7 +270,7 @@ def run_boardroom(score_data, l1, l2, l3):
     prompt = f"""You are running The Boardroom — a council of the world's greatest investors and traders.
 
 Current Undertow Index reading:
-- Score: {score_data['score']}/12
+- Score: {score_data['score']}/16
 - Signal: {score_data['signal']}
 - Summary: {score_data['summary']}
 
@@ -348,7 +348,7 @@ def get_trade_ideas(score_data, l1, l2, l3):
     all_flags = l1["flags"] + l2["flags"] + l3["flags"]
     flags_text = "\n".join(all_flags) if all_flags else "No flags."
 
-    prompt = f"""You are Michael Burry's trading desk AI. Current Undertow signal: {signal} ({score}/12).
+    prompt = f"""You are Michael Burry's trading desk AI. Current Undertow signal: {signal} ({score}/16).
 
 Active flags:
 {flags_text}
@@ -414,7 +414,7 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html=""):
 </h1>
 <p style="color: #aaa;">{date_str}</p>
 <div style="background: #1a1a1a; border-left: 4px solid {signal_color}; padding: 15px; margin: 20px 0; border-radius: 4px;">
-  <h2 style="margin: 0; color: {signal_color};">Score: {score}/12</h2>
+  <h2 style="margin: 0; color: {signal_color};">Score: {score}/16</h2>
   <p style="margin: 8px 0 0 0;">{score_data['summary']}</p>
 </div>
 <h3 style="color: #f0c040;">⚡ Active Stress Flags</h3>
@@ -448,7 +448,7 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html=""):
             json={
                 "from": "Undertow Index <onboarding@resend.dev>",
                 "to": [ALERT_EMAIL],
-                "subject": f"{emoji} Undertow Index — {signal} ({score}/12) — {datetime.datetime.now().strftime('%d %b %Y')}",
+                "subject": f"{emoji} Undertow Index — {signal} ({score}/16) — {datetime.datetime.now().strftime('%d %b %Y')}",
                 "html": html
             },
             timeout=15
@@ -685,9 +685,9 @@ def main():
     l3 = get_layer3()
     print(f"  Score: {l3['score']}/{l3['max']} | Flags: {len(l3['flags'])}")
 
-    print("[Layer 3b] COT positioning & repo stress...")
+    print("[Layer 3b] COT positioning & repo stress...", flush=True)
     l3b = get_layer3b()
-    print(f"  Score: {l3b['score']}/{l3b['max']} | Flags: {len(l3b['flags'])}")
+    print(f"  Score: {l3b['score']}/{l3b['max']} | Flags: {len(l3b['flags'])}", flush=True)
 
     print("[Layer 4] Computing composite score...")
     score_data = compute_score(l1, l2, l3, l3b)
