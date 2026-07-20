@@ -161,14 +161,90 @@ def get_layer3():
 # ─────────────────────────────────────────────
 # LAYER 4: COMPOSITE SCORE
 # ─────────────────────────────────────────────
-def compute_score(l1, l2, l3):
-    total = l1["score"] + l2["score"] + l3["score"]
+# ──────────────────────────────────────────────
+# LAYER 3b: COT POSITIONING & REPO STRESS
+# ──────────────────────────────────────────────
+def get_layer3b():
+    score = 0
+    flags = []
+    data = {}
 
-    if total <= 3:
+    try:
+        cot_url = "https://publicreporting.cftc.gov/resource/jun7-fc8e.json"
+        cot_params = {
+            "$where": "contract_market_name like '%E-MINI S%P 500%'",
+            "$order": "report_date_as_yyyy_mm_dd DESC",
+            "$limit": 1
+        }
+        cot_resp = requests.get(cot_url, params=cot_params, timeout=10)
+        cot_data = cot_resp.json()
+
+        if cot_data:
+            long_pos = float(cot_data[0].get("lev_money_positions_long", 0))
+            short_pos = float(cot_data[0].get("lev_money_positions_short", 0))
+            net_pos = long_pos - short_pos
+            data["cot_long"] = long_pos
+            data["cot_short"] = short_pos
+            data["cot_net"] = net_pos
+            if net_pos < 0:
+                score += 1
+                flags.append(f"COT: leveraged funds net SHORT E-mini S&P ({net_pos:,.0f} contracts)")
+        else:
+            flags.append("COT: no data returned")
+    except Exception as e:
+        flags.append(f"Layer 3b COT error: {e}")
+
+    try:
+        def fred_latest(series_id):
+            url = "https://api.stlouisfed.org/fred/series/observations"
+            params = {"series_id": series_id, "api_key": FRED_API_KEY,
+                      "file_type": "json", "sort_order": "desc", "limit": 5}
+            r = requests.get(url, params=params, timeout=10)
+            for o in r.json()["observations"]:
+                if o["value"] != ".":
+                    return float(o["value"])
+            return None
+
+        sofr = fred_latest("SOFR")
+        dff = fred_latest("DFF")
+        rrp = fred_latest("RRPONTSYD")
+        dgs3mo = fred_latest("DGS3MO")
+
+        if sofr is not None and dff is not None:
+            spread = sofr - dff
+            data["sofr_dff_spread"] = round(spread, 3)
+            if spread > 0.10:
+                score += 2
+                flags.append(f"SOFR-Fed Funds spread widening ({spread:.2f}pp) - repo stress")
+            elif spread > 0.05:
+                score += 1
+                flags.append(f"SOFR-Fed Funds spread elevated ({spread:.2f}pp)")
+
+        if rrp is not None:
+            data["reverse_repo_bn"] = round(rrp, 1)
+            if rrp > 100:
+                score += 1
+                flags.append(f"Reverse repo usage spiking (${rrp:.0f}B)")
+
+        if sofr is not None and dgs3mo is not None:
+            ted = dgs3mo - sofr
+            data["ted_spread_equiv"] = round(ted, 3)
+            if ted < -0.15:
+                score += 1
+                flags.append(f"TED-equivalent spread inverted ({ted:.2f}pp) - funding stress")
+    except Exception as e:
+        flags.append(f"Layer 3b repo/TED error: {e}")
+
+    return {"score": score, "max": 4, "flags": flags, "data": data}
+
+def compute_score(l1, l2, l3, l3b):
+    total = l1["score"] + l2["score"] + l3["score"] + l3b["score"]
+
+    if total <= 4:
         signal = "GREEN"
         emoji = "🟢"
         summary = "Markets calm. No significant stress signals detected."
-    elif total <= 7:
+    elif total <= 10:
         signal = "AMBER"
         emoji = "🟡"
         summary = "Elevated risk. Multiple stress signals present. Watch closely."
@@ -177,7 +253,7 @@ def compute_score(l1, l2, l3):
         emoji = "🔴"
         summary = "High alert. Significant macro stress across multiple indicators."
 
-    return {"score": total, "max": 12, "signal": signal, "emoji": emoji, "summary": summary}
+    return {"score": total, "max": 16, "signal": signal, "emoji": emoji, "summary": summary}
 
 # ─────────────────────────────────────────────
 # LAYER 5: THE BOARDROOM
@@ -609,9 +685,13 @@ def main():
     l3 = get_layer3()
     print(f"  Score: {l3['score']}/{l3['max']} | Flags: {len(l3['flags'])}")
 
+    print("[Layer 3b] COT positioning & repo stress...")
+    l3b = get_layer3b()
+    print(f"  Score: {l3b['score']}/{l3b['max']} | Flags: {len(l3b['flags'])}")
+
     print("[Layer 4] Computing composite score...")
-    score_data = compute_score(l1, l2, l3)
-    print(f"\n  {score_data['emoji']} SIGNAL: {score_data['signal']} ({score_data['score']}/12)")
+    score_data = compute_score(l1, l2, l3, l3b)
+    print(f"\n  {score_data['emoji']} SIGNAL: {score_data['signal']} ({score_data['score']}/16)")
     print(f"  {score_data['summary']}")
 
     for flag in l1["flags"] + l2["flags"] + l3["flags"]:
