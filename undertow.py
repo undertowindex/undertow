@@ -237,6 +237,47 @@ def get_layer3b():
 
     return {"score": score, "max": 4, "flags": flags, "data": data}
 
+def run_sanity_checks(l1, l2, l3, l3b):
+    warnings = []
+
+    vix = l1["data"].get("vix")
+    if vix is not None and not (5 <= vix <= 100):
+        warnings.append(f"Layer 1 sanity: VIX {vix} outside plausible range (5-100)")
+    for name in ["spy", "rsp", "nvda"]:
+        v = l1["data"].get(name)
+        if v is not None and v <= 0:
+            warnings.append(f"Layer 1 sanity: {name} price {v} is non-positive")
+
+    yc = l2["data"].get("yield_curve_spread")
+    if yc is not None and not (-5 <= yc <= 5):
+        warnings.append(f"Layer 2 sanity: yield curve spread {yc} outside plausible range (-5pp to 5pp)")
+    hy = l2["data"].get("hy_spread")
+    if hy is not None and not (0 <= hy <= 20):
+        warnings.append(f"Layer 2 sanity: HY spread {hy} outside plausible range (0-20%)")
+
+    yen = l3["data"].get("yen")
+    if yen is not None and not (50 <= yen <= 300):
+        warnings.append(f"Layer 3 sanity: yen {yen} outside plausible range (50-300)")
+    cg = l3["data"].get("copper_gold_ratio")
+    if cg is not None and not (0 < cg < 1):
+        warnings.append(f"Layer 3 sanity: copper/gold ratio {cg} outside plausible range (0-1)")
+
+    sofr_dff = l3b["data"].get("sofr_dff_spread")
+    if sofr_dff is not None and not (-2 <= sofr_dff <= 2):
+        warnings.append(f"Layer 3b sanity: SOFR-DFF spread {sofr_dff} outside plausible range (-2pp to 2pp)")
+    rrp = l3b["data"].get("reverse_repo_bn")
+    if rrp is not None and rrp < 0:
+        warnings.append(f"Layer 3b sanity: reverse repo {rrp} is negative")
+    ted = l3b["data"].get("ted_spread_equiv")
+    if ted is not None and not (-2 <= ted <= 2):
+        warnings.append(f"Layer 3b sanity: TED-equivalent spread {ted} outside plausible range (-2pp to 2pp)")
+
+    for label, layer in [("Layer 1", l1), ("Layer 2", l2), ("Layer 3", l3), ("Layer 3b", l3b)]:
+        if not (0 <= layer["score"] <= layer["max"]):
+            warnings.append(f"{label} sanity: score {layer['score']} outside valid range 0-{layer['max']}")
+
+    return warnings
+
 def compute_score(l1, l2, l3, l3b):
     total = l1["score"] + l2["score"] + l3["score"] + l3b["score"]
 
@@ -690,6 +731,14 @@ def main():
     print("[Layer 3b] COT positioning & repo stress...", flush=True)
     l3b = get_layer3b()
     print(f"  Score: {l3b['score']}/{l3b['max']} | Flags: {len(l3b['flags'])}", flush=True)
+
+    print("[Self-Test] Running sanity checks...", flush=True)
+    sanity_warnings = run_sanity_checks(l1, l2, l3, l3b)
+    if sanity_warnings:
+        for w in sanity_warnings:
+            print(f"  🚨 {w}", flush=True)
+    else:
+        print("  All checks passed.", flush=True)
 
     print("[Layer 4] Computing composite score...")
     score_data = compute_score(l1, l2, l3, l3b)
