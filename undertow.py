@@ -312,6 +312,8 @@ Then give a BOARDROOM VERDICT:
 - 2-3 sentence synthesis of why
 - Confidence level (Low / Medium / High)
 
+CRITICAL: There are exactly 17 members listed above. Each member must appear exactly once - do not repeat any member's name in the panel discussion or in the vote tally, and do not invent additional members. Before writing the BOARDROOM VERDICT vote tally, re-count the panel section you just wrote: the CONFIRM + UPGRADE + DOWNGRADE vote counts MUST sum to exactly 17. Recheck this arithmetic before outputting the table.
+
 Format clearly with each member's name bolded."""
 
     try:
