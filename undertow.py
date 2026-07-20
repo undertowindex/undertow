@@ -13,6 +13,31 @@ RESEND_API_KEY = os.environ.get("SENDGRID_API_KEY", "")
 ALERT_EMAIL = os.environ.get("ALERT_EMAIL", "micahbrown4@me.com")
 
 # ─────────────────────────────────────────────
+def fred_get(series_id, retries=3, backoff_seconds=2):
+    """Shared FRED API fetch with retry logic. Skips missing ('.') values
+    and returns the most recent real observation. Returns None if the
+    series has no valid data or every attempt fails."""
+    import time
+    url = "https://api.stlouisfed.org/fred/series/observations"
+    params = {"series_id": series_id, "api_key": FRED_API_KEY,
+              "file_type": "json", "sort_order": "desc", "limit": 5}
+
+    for attempt in range(1, retries + 1):
+        try:
+            r = requests.get(url, params=params, timeout=10)
+            r.raise_for_status()
+            for o in r.json()["observations"]:
+                if o["value"] != ".":
+                    return float(o["value"])
+            return None
+        except Exception as e:
+            if attempt < retries:
+                time.sleep(backoff_seconds * attempt)
+            else:
+                print(f"  ⚠️  FRED fetch failed for {series_id} after {retries} attempts: {e}", flush=True)
+                return None
+
+# ─────────────────────────────────────────────
 # LAYER 1: EQUITY PULSE
 # ─────────────────────────────────────────────
 def get_layer1():
@@ -83,10 +108,7 @@ def get_layer2():
 
     try:
         def fred(series):
-            url = f"https://api.stlouisfed.org/fred/series/observations?series_id={series}&api_key={FRED_API_KEY}&limit=5&sort_order=desc&file_type=json"
-            r = requests.get(url, timeout=10)
-            obs = r.json()["observations"]
-            return float(obs[0]["value"])
+            return fred_get(series)
 
         t10 = fred("DGS10")
         t2 = fred("DGS2")
@@ -196,14 +218,7 @@ def get_layer3b():
 
     try:
         def fred_latest(series_id):
-            url = "https://api.stlouisfed.org/fred/series/observations"
-            params = {"series_id": series_id, "api_key": FRED_API_KEY,
-                      "file_type": "json", "sort_order": "desc", "limit": 5}
-            r = requests.get(url, params=params, timeout=10)
-            for o in r.json()["observations"]:
-                if o["value"] != ".":
-                    return float(o["value"])
-            return None
+            return fred_get(series_id)
 
         sofr = fred_latest("SOFR")
         dff = fred_latest("DFF")
