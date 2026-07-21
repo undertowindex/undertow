@@ -407,6 +407,8 @@ Then give a BOARDROOM VERDICT:
 
 CRITICAL: There are exactly 17 members listed above. Each member must appear exactly once - do not repeat any member's name in the panel discussion or in the vote tally, and do not invent additional members. Before writing the BOARDROOM VERDICT vote tally, re-count the panel section you just wrote: the CONFIRM + UPGRADE + DOWNGRADE vote counts MUST sum to exactly 17. Recheck this arithmetic before outputting the table.
 
+CRITICAL - ORDERING: Write the members in STRICT sequential order, 1 through 17, exactly as numbered in the list above. Fully complete each member's entire entry (their view AND their vote) before starting the next numbered member. Do NOT interleave, interrupt, or jump ahead to a later-numbered member mid-way through an earlier one. Do NOT go back to an earlier number after moving on. Before outputting your final answer, verify the member numbers appear in ascending order with no gaps, repeats, or interruptions.
+
 Format clearly with each member's name bolded."""
 
     try:
