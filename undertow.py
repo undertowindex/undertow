@@ -307,9 +307,10 @@ def get_layer3c():
 
     try:
         pc_url = "https://cdn.cboe.com/resources/options/volume_and_call_put_ratios/indexpcarchive.csv"
-        pc_resp = requests.get(pc_url, timeout=15)
-        pc_lines = pc_resp.text.strip().split("\n")
-        pc_rows = [line.split(",") for line in pc_lines[3:] if line.strip()]
+        pc_resp = requests.get(pc_url, headers={"Range": "bytes=-5000"}, timeout=15)
+        pc_text = pc_resp.text
+        pc_lines = [ln for ln in pc_text.strip().split("\n") if ln.strip()]
+        pc_rows = [line.split(",") for line in pc_lines if line[0].isdigit()]
         last_row = pc_rows[-1]
         pc_ratio = float(last_row[4])
         data["put_call_ratio"] = pc_ratio
