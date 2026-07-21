@@ -252,7 +252,7 @@ def get_layer3b():
 
     return {"score": score, "max": 4, "flags": flags, "data": data}
 
-def run_sanity_checks(l1, l2, l3, l3b, l3c):
+def run_sanity_checks(l1, l2, l3, l3b, l3c, l3d):
     warnings = []
 
     vix = l1["data"].get("vix")
@@ -291,7 +291,11 @@ def run_sanity_checks(l1, l2, l3, l3b, l3c):
     if pcr is not None and not (0.1 <= pcr <= 5):
         warnings.append(f"Layer 3c sanity: put/call ratio {pcr} outside plausible range (0.1-5)")
 
-    for label, layer in [("Layer 1", l1), ("Layer 2", l2), ("Layer 3", l3), ("Layer 3b", l3b), ("Layer 3c", l3c)]:
+    skew_val = l3d["data"].get("skew")
+    if skew_val is not None and not (80 <= skew_val <= 200):
+        warnings.append(f"Layer 3d sanity: SKEW {skew_val} outside plausible range (80-200)")
+
+    for label, layer in [("Layer 1", l1), ("Layer 2", l2), ("Layer 3", l3), ("Layer 3b", l3b), ("Layer 3c", l3c), ("Layer 3d", l3d)]:
         if not (0 <= layer["score"] <= layer["max"]):
             warnings.append(f"{label} sanity: score {layer['score']} outside valid range 0-{layer['max']}")
 
@@ -330,14 +334,39 @@ def get_layer3c():
 
     return {"score": score, "max": 2, "flags": flags, "data": data}
 
-def compute_score(l1, l2, l3, l3b, l3c):
-    total = l1["score"] + l2["score"] + l3["score"] + l3b["score"] + l3c["score"]
+# ──────────────────────────────────────────────
+# LAYER 3d: SKEW INDEX (TAIL-RISK PRICING)
+# ──────────────────────────────────────────────
+def get_layer3d():
+    score = 0
+    flags = []
+    data = {}
 
-    if total <= 5:
+    try:
+        tickers = yf.download("^SKEW", period="5d", interval="1d", progress=False)
+        close = tickers["Close"]
+        skew = float(close["^SKEW"].dropna().iloc[-1])
+        data["skew"] = round(skew, 2)
+
+        if skew > 150:
+            score += 2
+            flags.append(f"SKEW elevated at {skew:.1f} - crash-tail protection pricing rising")
+        elif skew > 135:
+            score += 1
+            flags.append(f"SKEW moderately elevated at {skew:.1f}")
+    except Exception as e:
+        flags.append(f"Layer 3d SKEW error: {e}")
+
+    return {"score": score, "max": 2, "flags": flags, "data": data}
+
+def compute_score(l1, l2, l3, l3b, l3c, l3d):
+    total = l1["score"] + l2["score"] + l3["score"] + l3b["score"] + l3c["score"] + l3d["score"]
+
+    if total <= 6:
         signal = "GREEN"
         emoji = "🟢"
         summary = "Markets calm. No significant stress signals detected."
-    elif total <= 12:
+    elif total <= 13:
         signal = "AMBER"
         emoji = "🟡"
         summary = "Elevated risk. Multiple stress signals present. Watch closely."
@@ -346,7 +375,7 @@ def compute_score(l1, l2, l3, l3b, l3c):
         emoji = "🔴"
         summary = "High alert. Significant macro stress across multiple indicators."
 
-    return {"score": total, "max": 19, "signal": signal, "emoji": emoji, "summary": summary}
+    return {"score": total, "max": 21, "signal": signal, "emoji": emoji, "summary": summary}
 
 # ─────────────────────────────────────────────
 # LAYER 5: THE BOARDROOM
@@ -363,7 +392,7 @@ def run_boardroom(score_data, l1, l2, l3):
     prompt = f"""You are running The Boardroom — a council of the world's greatest investors and traders.
 
 Current Undertow Index reading:
-- Score: {score_data['score']}/19
+- Score: {score_data['score']}/21
 - Signal: {score_data['signal']}
 - Summary: {score_data['summary']}
 
@@ -445,7 +474,7 @@ def get_trade_ideas(score_data, l1, l2, l3):
     all_flags = l1["flags"] + l2["flags"] + l3["flags"]
     flags_text = "\n".join(all_flags) if all_flags else "No flags."
 
-    prompt = f"""You are Michael Burry's trading desk AI. Current Undertow signal: {signal} ({score}/19).
+    prompt = f"""You are Michael Burry's trading desk AI. Current Undertow signal: {signal} ({score}/21).
 
 Active flags:
 {flags_text}
@@ -511,7 +540,7 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html=""):
 </h1>
 <p style="color: #aaa;">{date_str}</p>
 <div style="background: #1a1a1a; border-left: 4px solid {signal_color}; padding: 15px; margin: 20px 0; border-radius: 4px;">
-  <h2 style="margin: 0; color: {signal_color};">Score: {score}/19</h2>
+  <h2 style="margin: 0; color: {signal_color};">Score: {score}/21</h2>
   <p style="margin: 8px 0 0 0;">{score_data['summary']}</p>
 </div>
 <h3 style="color: #f0c040;">⚡ Active Stress Flags</h3>
@@ -545,7 +574,7 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html=""):
             json={
                 "from": "Undertow Index <onboarding@resend.dev>",
                 "to": [ALERT_EMAIL],
-                "subject": f"{emoji} Undertow Index — {signal} ({score}/19) — {datetime.datetime.now().strftime('%d %b %Y')}",
+                "subject": f"{emoji} Undertow Index — {signal} ({score}/21) — {datetime.datetime.now().strftime('%d %b %Y')}",
                 "html": html
             },
             timeout=15
@@ -790,8 +819,12 @@ def main():
     l3c = get_layer3c()
     print(f"  Score: {l3c['score']}/{l3c['max']} | Flags: {len(l3c['flags'])}", flush=True)
 
+    print("[Layer 3d] SKEW index (tail-risk pricing)...", flush=True)
+    l3d = get_layer3d()
+    print(f"  Score: {l3d['score']}/{l3d['max']} | Flags: {len(l3d['flags'])}", flush=True)
+
     print("[Self-Test] Running sanity checks...", flush=True)
-    sanity_warnings = run_sanity_checks(l1, l2, l3, l3b, l3c)
+    sanity_warnings = run_sanity_checks(l1, l2, l3, l3b, l3c, l3d)
     if sanity_warnings:
         for w in sanity_warnings:
             print(f"  🚨 {w}", flush=True)
@@ -799,8 +832,8 @@ def main():
         print("  All checks passed.", flush=True)
 
     print("[Layer 4] Computing composite score...")
-    score_data = compute_score(l1, l2, l3, l3b, l3c)
-    print(f"\n  {score_data['emoji']} SIGNAL: {score_data['signal']} ({score_data['score']}/19)")
+    score_data = compute_score(l1, l2, l3, l3b, l3c, l3d)
+    print(f"\n  {score_data['emoji']} SIGNAL: {score_data['signal']} ({score_data['score']}/21)")
     print(f"  {score_data['summary']}")
 
     for flag in l1["flags"] + l2["flags"] + l3["flags"]:
