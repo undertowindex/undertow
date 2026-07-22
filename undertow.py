@@ -146,7 +146,7 @@ def get_layer3():
     data = {}
 
     try:
-        tickers = yf.download("JPY=X GC=F HG=F", period="5d", interval="1d", progress=False)
+        tickers = yf.download("JPY=X GC=F HG=F UUP", period="4mo", interval="1d", progress=False)
         close = tickers["Close"]
 
         yen = float(close["JPY=X"].dropna().iloc[-1])
@@ -175,10 +175,24 @@ def get_layer3():
             score += 1
             flags.append(f"Copper/gold ratio softening at {copper_gold:.6f}")
 
+        dollar = float(close["UUP"].dropna().iloc[-1])
+        dollar_ma50 = float(close["UUP"].dropna().tail(50).mean())
+        dollar_pct_above_ma = (dollar - dollar_ma50) / dollar_ma50 * 100
+        data["dollar_proxy"] = round(dollar, 3)
+        data["dollar_ma50"] = round(dollar_ma50, 3)
+        data["dollar_pct_above_ma"] = round(dollar_pct_above_ma, 2)
+
+        if dollar_pct_above_ma > 3:
+            score += 2
+            flags.append(f"Dollar strongly above its 50-day average ({dollar_pct_above_ma:.1f}%) - possible flight-to-safety demand")
+        elif dollar_pct_above_ma > 1.5:
+            score += 1
+            flags.append(f"Dollar above its 50-day average ({dollar_pct_above_ma:.1f}%)")
+
     except Exception as e:
         flags.append(f"Layer 3 error: {e}")
 
-    return {"score": score, "max": 4, "flags": flags, "data": data}
+    return {"score": score, "max": 6, "flags": flags, "data": data}
 
 # ─────────────────────────────────────────────
 # LAYER 4: COMPOSITE SCORE
@@ -277,6 +291,10 @@ def run_sanity_checks(l1, l2, l3, l3b, l3c, l3d):
     if cg is not None and not (0 < cg < 1):
         warnings.append(f"Layer 3 sanity: copper/gold ratio {cg} outside plausible range (0-1)")
 
+    dpam = l3["data"].get("dollar_pct_above_ma")
+    if dpam is not None and not (-15 <= dpam <= 15):
+        warnings.append(f"Layer 3 sanity: dollar % above 50-day MA {dpam} outside plausible range (-15 to 15)")
+
     sofr_dff = l3b["data"].get("sofr_dff_spread")
     if sofr_dff is not None and not (-2 <= sofr_dff <= 2):
         warnings.append(f"Layer 3b sanity: SOFR-DFF spread {sofr_dff} outside plausible range (-2pp to 2pp)")
@@ -362,11 +380,11 @@ def get_layer3d():
 def compute_score(l1, l2, l3, l3b, l3c, l3d):
     total = l1["score"] + l2["score"] + l3["score"] + l3b["score"] + l3c["score"] + l3d["score"]
 
-    if total <= 6:
+    if total <= 7:
         signal = "GREEN"
         emoji = "🟢"
         summary = "Markets calm. No significant stress signals detected."
-    elif total <= 13:
+    elif total <= 14:
         signal = "AMBER"
         emoji = "🟡"
         summary = "Elevated risk. Multiple stress signals present. Watch closely."
@@ -375,7 +393,7 @@ def compute_score(l1, l2, l3, l3b, l3c, l3d):
         emoji = "🔴"
         summary = "High alert. Significant macro stress across multiple indicators."
 
-    return {"score": total, "max": 21, "signal": signal, "emoji": emoji, "summary": summary}
+    return {"score": total, "max": 23, "signal": signal, "emoji": emoji, "summary": summary}
 
 # ─────────────────────────────────────────────
 # LAYER 5: THE BOARDROOM
@@ -392,7 +410,7 @@ def run_boardroom(score_data, l1, l2, l3):
     prompt = f"""You are running The Boardroom — a council of the world's greatest investors and traders.
 
 Current Undertow Index reading:
-- Score: {score_data['score']}/21
+- Score: {score_data['score']}/23
 - Signal: {score_data['signal']}
 - Summary: {score_data['summary']}
 
@@ -474,7 +492,7 @@ def get_trade_ideas(score_data, l1, l2, l3):
     all_flags = l1["flags"] + l2["flags"] + l3["flags"]
     flags_text = "\n".join(all_flags) if all_flags else "No flags."
 
-    prompt = f"""You are Michael Burry's trading desk AI. Current Undertow signal: {signal} ({score}/21).
+    prompt = f"""You are Michael Burry's trading desk AI. Current Undertow signal: {signal} ({score}/23).
 
 Active flags:
 {flags_text}
@@ -540,7 +558,7 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html=""):
 </h1>
 <p style="color: #aaa;">{date_str}</p>
 <div style="background: #1a1a1a; border-left: 4px solid {signal_color}; padding: 15px; margin: 20px 0; border-radius: 4px;">
-  <h2 style="margin: 0; color: {signal_color};">Score: {score}/21</h2>
+  <h2 style="margin: 0; color: {signal_color};">Score: {score}/23</h2>
   <p style="margin: 8px 0 0 0;">{score_data['summary']}</p>
 </div>
 <h3 style="color: #f0c040;">⚡ Active Stress Flags</h3>
@@ -574,7 +592,7 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html=""):
             json={
                 "from": "Undertow Index <onboarding@resend.dev>",
                 "to": [ALERT_EMAIL],
-                "subject": f"{emoji} Undertow Index — {signal} ({score}/21) — {datetime.datetime.now().strftime('%d %b %Y')}",
+                "subject": f"{emoji} Undertow Index — {signal} ({score}/23) — {datetime.datetime.now().strftime('%d %b %Y')}",
                 "html": html
             },
             timeout=15
@@ -833,7 +851,7 @@ def main():
 
     print("[Layer 4] Computing composite score...")
     score_data = compute_score(l1, l2, l3, l3b, l3c, l3d)
-    print(f"\n  {score_data['emoji']} SIGNAL: {score_data['signal']} ({score_data['score']}/21)")
+    print(f"\n  {score_data['emoji']} SIGNAL: {score_data['signal']} ({score_data['score']}/23)")
     print(f"  {score_data['summary']}")
 
     for flag in l1["flags"] + l2["flags"] + l3["flags"]:
