@@ -4,6 +4,9 @@ import datetime
 import requests
 import yfinance as yf
 
+from glint.runner import run_glint
+from glint.email_section import build_glint_section
+
 # ─────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────
@@ -537,7 +540,7 @@ Be specific. No waffle."""
 # ─────────────────────────────────────────────
 # LAYER 7: EMAIL via RESEND
 # ─────────────────────────────────────────────
-def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html=""):
+def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", glint_html=""):
     if not RESEND_API_KEY:
         print("No Resend key — skipping email.")
         return
@@ -576,6 +579,10 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html=""):
 <h3 style="color: #f0c040;">📊 IBKR Portfolio</h3>
 <div style="background: #1a1a1a; padding: 15px; border-radius: 4px; white-space: pre-wrap; line-height: 1.6; font-family: monospace; font-size: 13px;">
 {layer8_html}
+</div>
+<h3 style="color: #f0c040;">💎 Glint — Value Screen</h3>
+<div style="background: #1a1a1a; padding: 15px; border-radius: 4px; white-space: pre-wrap; line-height: 1.6; font-family: monospace; font-size: 13px;">
+{glint_html}
 </div>
 <hr style="border-color: #333; margin-top: 30px;">
 <p style="color: #555; font-size: 12px;">Undertow Index — automated macro intelligence. Not financial advice.</p>
@@ -870,8 +877,18 @@ def main():
     layer8_html = format_layer8_for_email(layer8_data)
     print(layer8_html)
 
+    print("\n[Glint] Screening watchlist for undervalued quality names...", flush=True)
+    try:
+        glint_results = run_glint()
+        glint_html = build_glint_section(glint_results)
+        candidates = sum(1 for r, f in glint_results if r.is_candidate)
+        print(f"  {candidates} candidate(s) found", flush=True)
+    except Exception as e:
+        print(f"  ⚠️  Glint screen failed, skipping section: {e}", flush=True)
+        glint_html = "💎 Glint screen unavailable today."
+
     print("\n[Layer 7] Sending email report...")
-    send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html)
+    send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html, glint_html)
 
     print("\n" + "=" * 60)
     print("UNDERTOW INDEX — COMPLETE")
