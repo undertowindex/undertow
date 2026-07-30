@@ -7,6 +7,10 @@ import yfinance as yf
 
 from glint.runner import run_glint
 from glint.email_section import build_glint_section
+from boardroom_research import (
+    should_run_full_research, run_member_research, run_full_boardroom,
+    run_glint_review, log_run,
+)
 
 # ─────────────────────────────────────────────
 def yf_download_with_retry(tickers, retries=3, backoff_seconds=3, **kwargs):
@@ -658,7 +662,7 @@ Be specific. No waffle."""
 # ─────────────────────────────────────────────
 # LAYER 7: EMAIL via RESEND
 # ─────────────────────────────────────────────
-def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", glint_html="", sanity_warnings=None, final_signal_data=None):
+def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", glint_html="", sanity_warnings=None, final_signal_data=None, glint_review=""):
     if not RESEND_API_KEY:
         print("No Resend key — skipping email.")
         return
@@ -732,6 +736,10 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", g
 <div style="background: #1a1a1a; padding: 15px; border-radius: 4px; white-space: pre-wrap; line-height: 1.6; font-family: monospace; font-size: 13px;">
 {glint_html}
 </div>
+{f'''<h3 style="color: #f0c040;">🏛️💎 Boardroom Review of Glint Candidates</h3>
+<div style="background: #1a1a1a; padding: 15px; border-radius: 4px; white-space: pre-wrap; line-height: 1.6;">
+{glint_review}
+</div>''' if glint_review else ''}
 <hr style="border-color: #333; margin-top: 30px;">
 <p style="color: #555; font-size: 12px;">Undertow Index — automated macro intelligence. Not financial advice.</p>
 </body></html>
@@ -1012,8 +1020,52 @@ def main():
     for flag in l1["flags"] + l2["flags"] + l3["flags"]:
         print(f"  ⚠️  {flag}")
 
-    print("\n[Layer 5] Running The Boardroom...")
-    boardroom = run_boardroom(score_data, l1, l2, l3)
+    # Glint runs before the Boardroom now, so the panel can review its
+    # candidates as part of the same grounded session.
+    print("\n[Glint] Screening watchlist for undervalued quality names...", flush=True)
+    glint_results = []
+    try:
+        glint_results = run_glint()
+        glint_html = build_glint_section(glint_results)
+        candidates = sum(1 for r, f in glint_results if r.is_candidate)
+        print(f"  {candidates} candidate(s) found", flush=True)
+    except Exception as e:
+        print(f"  ⚠️  Glint screen failed, skipping section: {e}", flush=True)
+        glint_html = "💎 Glint screen unavailable today."
+
+    all_flags = l1["flags"] + l2["flags"] + l3["flags"] + l3b["flags"] + l3d["flags"]
+    flags_text = "\n".join(all_flags) if all_flags else "No flags raised."
+    raw_data = {**l1.get("data", {}), **l2.get("data", {}), **l3.get("data", {}),
+                **l3b.get("data", {}), **l3d.get("data", {})}
+    data_text = json.dumps(raw_data, indent=2)
+
+    run_full, mode_reason = should_run_full_research(score_data["signal"])
+    boardroom_mode = "full" if run_full else "cheap"
+    print(f"\n[Layer 5] Boardroom mode: {boardroom_mode} ({mode_reason})", flush=True)
+
+    research = None
+    glint_review = ""
+    if run_full and ANTHROPIC_API_KEY:
+        try:
+            print("  Researching living members (live web search)...", flush=True)
+            research = run_member_research(ANTHROPIC_API_KEY, score_data["signal"], data_text, flags_text)
+            found = sum(1 for r in research if r["found"])
+            print(f"  Recent public commentary found for {found}/{len(research)} living members.", flush=True)
+            boardroom = run_full_boardroom(ANTHROPIC_API_KEY, score_data, data_text, flags_text, research)
+            boardroom = f"[Full grounded run — {mode_reason}; recent commentary found for {found}/{len(research)} living members]\n\n" + boardroom
+            try:
+                glint_review = run_glint_review(ANTHROPIC_API_KEY, research, glint_results, score_data)
+            except Exception as e:
+                print(f"  ⚠️  Glint review failed: {e}", flush=True)
+                glint_review = "Boardroom review of Glint candidates unavailable today (call failed)."
+        except Exception as e:
+            print(f"  ⚠️  Full boardroom failed ({e}) — falling back to cheap board.", flush=True)
+            research = None
+            boardroom = run_boardroom(score_data, l1, l2, l3)
+            boardroom = "[Desk view — full grounded run FAILED today, this is the unresearched fallback]\n\n" + boardroom
+    else:
+        boardroom = run_boardroom(score_data, l1, l2, l3)
+        boardroom = f"[Desk view — {mode_reason}; member takes are NOT grounded in fresh research today]\n\n" + boardroom
     print(boardroom)
 
     tally = parse_boardroom_tally(boardroom)
@@ -1022,6 +1074,8 @@ def main():
         print(f"  🏛️  BOARDROOM OVERRIDE: {final_signal_data['override_note']}", flush=True)
     elif final_signal_data["override_note"]:
         print(f"  🏛️  {final_signal_data['override_note']}", flush=True)
+
+    log_run(boardroom_mode, mode_reason, research, tally, final_signal_data, score_data)
 
     print("\n[Layer 6] Generating trade ideas...")
     trade_ideas = get_trade_ideas(score_data, l1, l2, l3, effective_signal=final_signal_data["signal"])
@@ -1032,18 +1086,25 @@ def main():
     layer8_html = format_layer8_for_email(layer8_data)
     print(layer8_html)
 
-    print("\n[Glint] Screening watchlist for undervalued quality names...", flush=True)
-    try:
-        glint_results = run_glint()
-        glint_html = build_glint_section(glint_results)
-        candidates = sum(1 for r, f in glint_results if r.is_candidate)
-        print(f"  {candidates} candidate(s) found", flush=True)
-    except Exception as e:
-        print(f"  ⚠️  Glint screen failed, skipping section: {e}", flush=True)
-        glint_html = "💎 Glint screen unavailable today."
+    # Labeled inputs for Ark Protocol (not built yet): composite score,
+    # the Boardroom's grounded market view, and its view on Glint's
+    # candidates - logged as one JSON blob so Ark can consume reasoning,
+    # not just one opaque number.
+    ark_inputs = {
+        "composite": {"score": score_data["score"], "max": score_data["max"], "signal": score_data["signal"]},
+        "boardroom": {"mode": boardroom_mode, "tally": tally,
+                      "final_signal": final_signal_data["signal"],
+                      "overridden": final_signal_data["overridden"]},
+        "glint_candidates": [
+            {"ticker": f.ticker, "value_score": r.value_score, "price": f.price}
+            for r, f in glint_results if r.is_candidate
+        ],
+        "glint_review_available": bool(glint_review),
+    }
+    print(f"ARK_INPUTS_JSON: {json.dumps(ark_inputs)}", flush=True)
 
     print("\n[Layer 7] Sending email report...")
-    send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html, glint_html, sanity_warnings, final_signal_data)
+    send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html, glint_html, sanity_warnings, final_signal_data, glint_review)
 
     print("\n" + "=" * 60)
     print("UNDERTOW INDEX — COMPLETE")
