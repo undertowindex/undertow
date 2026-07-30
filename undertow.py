@@ -1,11 +1,29 @@
 import os
 import json
+import time
 import datetime
 import requests
 import yfinance as yf
 
 from glint.runner import run_glint
 from glint.email_section import build_glint_section
+
+# ─────────────────────────────────────────────
+def yf_download_with_retry(tickers, retries=3, backoff_seconds=3, **kwargs):
+    """yf.download wrapper with retries. Without this, a transient fetch
+    error (rate limit, cache lock, network blip) makes a layer return its
+    all-clear default score instead of erroring loudly - the most
+    dangerous failure mode for a risk-alert system, since it looks
+    identical to genuinely calm markets."""
+    last_error = None
+    for attempt in range(1, retries + 1):
+        try:
+            return yf.download(tickers, progress=False, **kwargs)
+        except Exception as e:
+            last_error = e
+            if attempt < retries:
+                time.sleep(backoff_seconds * attempt)
+    raise last_error
 
 # ─────────────────────────────────────────────
 # CONFIG
@@ -18,8 +36,11 @@ ALERT_EMAIL = os.environ.get("ALERT_EMAIL", "micahbrown4@me.com")
 # ─────────────────────────────────────────────
 def fred_get(series_id, retries=3, backoff_seconds=2):
     """Shared FRED API fetch with retry logic. Skips missing ('.') values
-    and returns the most recent real observation. Returns None if the
-    series has no valid data or every attempt fails."""
+    and returns the most recent real observation as (value, date_str).
+    Returns (None, None) if the series has no valid data or every attempt
+    fails. Callers should check the date against today's date - FRED will
+    happily return a real, valid-looking number that is nonetheless old if
+    a series has stopped being updated upstream."""
     import time
     url = "https://api.stlouisfed.org/fred/series/observations"
     params = {"series_id": series_id, "api_key": FRED_API_KEY,
@@ -31,21 +52,21 @@ def fred_get(series_id, retries=3, backoff_seconds=2):
             r.raise_for_status()
             for o in r.json()["observations"]:
                 if o["value"] != ".":
-                    return float(o["value"])
-            return None
+                    return float(o["value"]), o["date"]
+            return None, None
         except Exception as e:
             if attempt < retries:
                 time.sleep(backoff_seconds * attempt)
             else:
                 print(f"  ⚠️  FRED fetch failed for {series_id} after {retries} attempts: {e}", flush=True)
-                return None
+                return None, None
 
 # ─────────────────────────────────────────────
 # LAYER 1: EQUITY PULSE
 # ─────────────────────────────────────────────
 def get_layer1():
     try:
-        tickers = yf.download("SPY RSP QQQ ^VIX NVDA", period="5d", interval="1d", progress=False)
+        tickers = yf_download_with_retry("SPY RSP QQQ ^VIX NVDA", period="5d", interval="1d")
         close = tickers["Close"]
 
         spy = float(close["SPY"].dropna().iloc[-1])
@@ -55,6 +76,7 @@ def get_layer1():
         nvda = float(close["NVDA"].dropna().iloc[-1])
         nvda_prev = float(close["NVDA"].dropna().iloc[-2])
         vix = float(close["^VIX"].dropna().iloc[-1])
+        last_bar_date = close["SPY"].dropna().index[-1].strftime("%Y-%m-%d")
 
         spy_chg = (spy - spy_prev) / spy_prev * 100
         rsp_chg = (rsp - rsp_prev) / rsp_prev * 100
@@ -95,7 +117,8 @@ def get_layer1():
                 "NVDA": round(nvda, 2), "NVDA_chg": round(nvda_chg, 2),
                 "VIX": round(vix, 2),
                 "RSP_SPY_ratio": round(rsp_spy_ratio, 4),
-                "RSP_SPY_ratio_chg": round(ratio_chg, 2)
+                "RSP_SPY_ratio_chg": round(ratio_chg, 2),
+                "last_bar_date": last_bar_date
             }
         }
     except Exception as e:
@@ -110,13 +133,11 @@ def get_layer2():
     data = {}
 
     try:
-        def fred(series):
-            return fred_get(series)
-
-        t10 = fred("DGS10")
-        t2 = fred("DGS2")
+        t10, t10_date = fred_get("DGS10")
+        t2, t2_date = fred_get("DGS2")
         spread = t10 - t2
         data["yield_curve_spread"] = round(spread, 3)
+        data["yield_curve_date"] = min(t10_date, t2_date)
 
         if spread < 0:
             score += 2
@@ -125,8 +146,9 @@ def get_layer2():
             score += 1
             flags.append(f"Yield curve flat: 10Y-2Y = {spread:.3f}%")
 
-        hy = fred("BAMLH0A0HYM2")
+        hy, hy_date = fred_get("BAMLH0A0HYM2")
         data["hy_spread"] = round(hy, 3)
+        data["hy_spread_date"] = hy_date
 
         if hy > 5.0:
             score += 2
@@ -149,7 +171,7 @@ def get_layer3():
     data = {}
 
     try:
-        tickers = yf.download("JPY=X GC=F HG=F UUP", period="4mo", interval="1d", progress=False)
+        tickers = yf_download_with_retry("JPY=X GC=F HG=F UUP", period="4mo", interval="1d")
         close = tickers["Close"]
 
         yen = float(close["JPY=X"].dropna().iloc[-1])
@@ -159,7 +181,9 @@ def get_layer3():
         gold = float(close["GC=F"].dropna().iloc[-1])
         copper = float(close["HG=F"].dropna().iloc[-1])
         copper_gold = copper / gold
+        last_bar_date = close["JPY=X"].dropna().index[-1].strftime("%Y-%m-%d")
         data["yen"] = round(yen, 4)
+        data["last_bar_date"] = last_bar_date
         data["yen_chg"] = round(yen_chg, 3)
         data["copper_gold_ratio"] = round(copper_gold, 6)
 
@@ -209,9 +233,15 @@ def get_layer3b():
     data = {}
 
     try:
-        cot_url = "https://publicreporting.cftc.gov/resource/jun7-fc8e.json"
+        # yw9f-hn96 is CFTC's "Traders in Financial Futures" report, which
+        # actually has lev_money_positions_long/short. The old resource id
+        # (jun7-fc8e) was the Legacy report - it lacks those fields
+        # entirely, so .get(..., 0) silently defaulted to 0 every day. The
+        # filter is now an exact match so it can't also match "MICRO
+        # E-MINI S&P 500", a different, much smaller retail contract.
+        cot_url = "https://publicreporting.cftc.gov/resource/yw9f-hn96.json"
         cot_params = {
-            "$where": "contract_market_name like '%E-MINI S%P 500%'",
+            "$where": "contract_market_name = 'E-MINI S&P 500'",
             "$order": "report_date_as_yyyy_mm_dd DESC",
             "$limit": 1
         }
@@ -225,6 +255,7 @@ def get_layer3b():
             data["cot_long"] = long_pos
             data["cot_short"] = short_pos
             data["cot_net"] = net_pos
+            data["cot_report_date"] = cot_data[0].get("report_date_as_yyyy_mm_dd", "")[:10]
             if net_pos < 0:
                 score += 1
                 flags.append(f"COT: leveraged funds net SHORT E-mini S&P ({net_pos:,.0f} contracts)")
@@ -234,17 +265,15 @@ def get_layer3b():
         flags.append(f"Layer 3b COT error: {e}")
 
     try:
-        def fred_latest(series_id):
-            return fred_get(series_id)
-
-        sofr = fred_latest("SOFR")
-        dff = fred_latest("DFF")
-        rrp = fred_latest("RRPONTSYD")
-        dgs3mo = fred_latest("DGS3MO")
+        sofr, sofr_date = fred_get("SOFR")
+        dff, dff_date = fred_get("DFF")
+        rrp, rrp_date = fred_get("RRPONTSYD")
+        dgs3mo, dgs3mo_date = fred_get("DGS3MO")
 
         if sofr is not None and dff is not None:
             spread = sofr - dff
             data["sofr_dff_spread"] = round(spread, 3)
+            data["sofr_dff_date"] = min(sofr_date, dff_date)
             if spread > 0.10:
                 score += 2
                 flags.append(f"SOFR-Fed Funds spread widening ({spread:.2f}pp) - repo stress")
@@ -254,6 +283,7 @@ def get_layer3b():
 
         if rrp is not None:
             data["reverse_repo_bn"] = round(rrp, 1)
+            data["reverse_repo_date"] = rrp_date
             if rrp > 100:
                 score += 1
                 flags.append(f"Reverse repo usage spiking (${rrp:.0f}B)")
@@ -261,6 +291,7 @@ def get_layer3b():
         if sofr is not None and dgs3mo is not None:
             ted = dgs3mo - sofr
             data["ted_spread_equiv"] = round(ted, 3)
+            data["ted_spread_date"] = min(sofr_date, dgs3mo_date)
             if ted < -0.15:
                 score += 1
                 flags.append(f"TED-equivalent spread inverted ({ted:.2f}pp) - funding stress")
@@ -268,6 +299,22 @@ def get_layer3b():
         flags.append(f"Layer 3b repo/TED error: {e}")
 
     return {"score": score, "max": 4, "flags": flags, "data": data}
+
+def _check_freshness(warnings, label, date_str, max_age_days=5):
+    """A stale-but-numerically-sane reading (e.g. a frozen archive quietly
+    returning an old-but-plausible value) passes every range check and is
+    still wrong. This checks the actual date behind each number, not just
+    whether the number itself looks reasonable."""
+    if not date_str:
+        return
+    try:
+        date = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+        age_days = (datetime.datetime.now() - date).days
+        if age_days > max_age_days:
+            warnings.append(f"{label} STALE DATA: dated {date_str} is {age_days} days old (expected within {max_age_days}) - feed may have stopped updating")
+    except ValueError:
+        warnings.append(f"{label} sanity: date {date_str!r} not parseable")
+
 
 def run_sanity_checks(l1, l2, l3, l3b, l3c, l3d):
     warnings = []
@@ -308,6 +355,19 @@ def run_sanity_checks(l1, l2, l3, l3b, l3c, l3d):
     if ted is not None and not (-2 <= ted <= 2):
         warnings.append(f"Layer 3b sanity: TED-equivalent spread {ted} outside plausible range (-2pp to 2pp)")
 
+    # Freshness checks across every layer that carries a date - daily
+    # market/FRED data gets 5 days' tolerance (covers weekends plus a
+    # holiday), COT gets 10 (it only reports weekly with a lag).
+    _check_freshness(warnings, "Layer 1", l1["data"].get("last_bar_date"), max_age_days=5)
+    _check_freshness(warnings, "Layer 2 (yield curve)", l2["data"].get("yield_curve_date"), max_age_days=5)
+    _check_freshness(warnings, "Layer 2 (HY spread)", l2["data"].get("hy_spread_date"), max_age_days=5)
+    _check_freshness(warnings, "Layer 3", l3["data"].get("last_bar_date"), max_age_days=5)
+    _check_freshness(warnings, "Layer 3b (COT)", l3b["data"].get("cot_report_date"), max_age_days=10)
+    _check_freshness(warnings, "Layer 3b (SOFR-DFF)", l3b["data"].get("sofr_dff_date"), max_age_days=5)
+    _check_freshness(warnings, "Layer 3b (reverse repo)", l3b["data"].get("reverse_repo_date"), max_age_days=5)
+    _check_freshness(warnings, "Layer 3b (TED-equiv)", l3b["data"].get("ted_spread_date"), max_age_days=5)
+    _check_freshness(warnings, "Layer 3d (SKEW)", l3d["data"].get("last_bar_date"), max_age_days=5)
+
     pcr = l3c["data"].get("put_call_ratio")
     if pcr is not None and not (0.1 <= pcr <= 5):
         warnings.append(f"Layer 3c sanity: put/call ratio {pcr} outside plausible range (0.1-5)")
@@ -325,35 +385,21 @@ def run_sanity_checks(l1, l2, l3, l3b, l3c, l3d):
 # ──────────────────────────────────────────────
 # LAYER 3c: OPTIONS SENTIMENT (PUT/CALL RATIO)
 # ──────────────────────────────────────────────
+# DISABLED as of 2026-07-30: CBOE's public CDN archive for this data is a
+# frozen historical dump, not a live feed - verified it stops at 2012
+# (and an alternate CBOE archive URL stops at 2019). It was silently
+# scoring "today's" sentiment off that frozen data every day since this
+# layer was added. No free live replacement was found. Contributes 0 and
+# max 0 until a real live source is wired in - see the loud flag below
+# instead of a silent absence.
 def get_layer3c():
-    score = 0
-    flags = []
-    data = {}
+    return {
+        "score": 0,
+        "max": 0,
+        "flags": ["Layer 3c DISABLED - CBOE's free put/call archive is stale (frozen since ~2012), not live data. Needs a paid/live options-data source before this can be trusted again."],
+        "data": {},
+    }
 
-    try:
-        pc_url = "https://cdn.cboe.com/resources/options/volume_and_call_put_ratios/indexpcarchive.csv"
-        pc_resp = requests.get(pc_url, headers={"Range": "bytes=-5000"}, timeout=15)
-        pc_text = pc_resp.text
-        pc_lines = [ln for ln in pc_text.strip().split("\n") if ln.strip()]
-        pc_rows = [line.split(",") for line in pc_lines if line[0].isdigit()]
-        last_row = pc_rows[-1]
-        pc_ratio = float(last_row[4])
-        data["put_call_ratio"] = pc_ratio
-        data["put_call_date"] = last_row[0]
-
-        if pc_ratio > 1.2:
-            score += 2
-            flags.append(f"Put/call ratio elevated at {pc_ratio:.2f} - heavy put buying, fear positioning")
-        elif pc_ratio > 1.0:
-            score += 1
-            flags.append(f"Put/call ratio above parity at {pc_ratio:.2f} - moderate hedging demand")
-        elif pc_ratio < 0.5:
-            score += 1
-            flags.append(f"Put/call ratio very low at {pc_ratio:.2f} - complacency risk")
-    except Exception as e:
-        flags.append(f"Layer 3c put/call ratio error: {e}")
-
-    return {"score": score, "max": 2, "flags": flags, "data": data}
 
 # ──────────────────────────────────────────────
 # LAYER 3d: SKEW INDEX (TAIL-RISK PRICING)
@@ -364,10 +410,11 @@ def get_layer3d():
     data = {}
 
     try:
-        tickers = yf.download("^SKEW", period="5d", interval="1d", progress=False)
+        tickers = yf_download_with_retry("^SKEW", period="5d", interval="1d")
         close = tickers["Close"]
         skew = float(close["^SKEW"].dropna().iloc[-1])
         data["skew"] = round(skew, 2)
+        data["last_bar_date"] = close["^SKEW"].dropna().index[-1].strftime("%Y-%m-%d")
 
         if skew > 150:
             score += 2
@@ -381,13 +428,16 @@ def get_layer3d():
     return {"score": score, "max": 2, "flags": flags, "data": data}
 
 def compute_score(l1, l2, l3, l3b, l3c, l3d):
+    # l3c is disabled (see get_layer3c) and always contributes 0/0, so the
+    # real max is 21, not 23. Thresholds rescaled down from 7/14 out of 23
+    # to 6/13 out of 21, matching the same proportion.
     total = l1["score"] + l2["score"] + l3["score"] + l3b["score"] + l3c["score"] + l3d["score"]
 
-    if total <= 7:
+    if total <= 6:
         signal = "GREEN"
         emoji = "🟢"
         summary = "Markets calm. No significant stress signals detected."
-    elif total <= 14:
+    elif total <= 13:
         signal = "AMBER"
         emoji = "🟡"
         summary = "Elevated risk. Multiple stress signals present. Watch closely."
@@ -396,7 +446,7 @@ def compute_score(l1, l2, l3, l3b, l3c, l3d):
         emoji = "🔴"
         summary = "High alert. Significant macro stress across multiple indicators."
 
-    return {"score": total, "max": 23, "signal": signal, "emoji": emoji, "summary": summary}
+    return {"score": total, "max": 21, "signal": signal, "emoji": emoji, "summary": summary}
 
 # ─────────────────────────────────────────────
 # LAYER 5: THE BOARDROOM
@@ -413,7 +463,7 @@ def run_boardroom(score_data, l1, l2, l3):
     prompt = f"""You are running The Boardroom — a council of the world's greatest investors and traders.
 
 Current Undertow Index reading:
-- Score: {score_data['score']}/23
+- Score: {score_data['score']}/{score_data['max']}
 - Signal: {score_data['signal']}
 - Summary: {score_data['summary']}
 
@@ -448,10 +498,10 @@ HISTORICAL GHOSTS:
 
 Each member should give:
 - A 1-2 sentence view in their authentic voice
-- A vote: CONFIRM {score_data['signal']} or UPGRADE (more severe) or DOWNGRADE (less severe)
+- A vote line formatted exactly like this example: "Vote: 🟢 CONFIRM". Choose the colored circle emoji based on the signal level that vote implies: 🟢 GREEN, 🟡 AMBER, 🔴 RED. CONFIRM implies the same color as the current signal ({score_data['signal']}); UPGRADE implies one level more severe (GREEN→AMBER→RED); DOWNGRADE implies one level less severe (RED→AMBER→GREEN). If the current signal is already at that extreme (e.g. UPGRADE from RED, or DOWNGRADE from GREEN), use the same color as the current signal.
 
 Then give a BOARDROOM VERDICT:
-- Final consensus signal (GREEN / AMBER / RED)
+- Final consensus signal, formatted as the matching colored emoji followed by the word: 🟢 GREEN, 🟡 AMBER, or 🔴 RED
 - 2-3 sentence synthesis of why
 - Confidence level (Low / Medium / High)
 
@@ -495,7 +545,7 @@ def get_trade_ideas(score_data, l1, l2, l3):
     all_flags = l1["flags"] + l2["flags"] + l3["flags"]
     flags_text = "\n".join(all_flags) if all_flags else "No flags."
 
-    prompt = f"""You are Michael Burry's trading desk AI. Current Undertow signal: {signal} ({score}/23).
+    prompt = f"""You are Michael Burry's trading desk AI. Current Undertow signal: {signal} ({score}/{score_data['max']}).
 
 Active flags:
 {flags_text}
@@ -540,7 +590,7 @@ Be specific. No waffle."""
 # ─────────────────────────────────────────────
 # LAYER 7: EMAIL via RESEND
 # ─────────────────────────────────────────────
-def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", glint_html=""):
+def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", glint_html="", sanity_warnings=None):
     if not RESEND_API_KEY:
         print("No Resend key — skipping email.")
         return
@@ -554,6 +604,17 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", g
     flags_html = "".join(f"<li>{f}</li>" for f in all_flags) if all_flags else "<li>No flags</li>"
     signal_color = {"GREEN": "#2ecc71", "AMBER": "#f39c12", "RED": "#e74c3c"}.get(signal, "#999")
 
+    sanity_warnings = sanity_warnings or []
+    sanity_html = ""
+    if sanity_warnings:
+        warnings_html = "".join(f"<li>{w}</li>" for w in sanity_warnings)
+        sanity_html = f"""
+<div style="background: #2a1a1a; border-left: 4px solid #e74c3c; padding: 15px; margin: 20px 0; border-radius: 4px;">
+  <h3 style="margin: 0 0 8px 0; color: #e74c3c;">🚨 Self-Test Warnings — treat the score above with caution</h3>
+  <ul style="margin: 6px 0; padding-left: 20px;">{warnings_html}</ul>
+</div>
+"""
+
     html = f"""
 <html><body style="font-family: Arial, sans-serif; max-width: 700px; margin: auto; background: #0d0d0d; color: #e0e0e0; padding: 20px;">
 <h1 style="color: {signal_color}; border-bottom: 2px solid {signal_color}; padding-bottom: 10px;">
@@ -561,9 +622,10 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", g
 </h1>
 <p style="color: #aaa;">{date_str}</p>
 <div style="background: #1a1a1a; border-left: 4px solid {signal_color}; padding: 15px; margin: 20px 0; border-radius: 4px;">
-  <h2 style="margin: 0; color: {signal_color};">Score: {score}/23</h2>
+  <h2 style="margin: 0; color: {signal_color};">Score: {score}/{score_data['max']}</h2>
   <p style="margin: 8px 0 0 0;">{score_data['summary']}</p>
 </div>
+{sanity_html}
 <h3 style="color: #f0c040;">⚡ Active Stress Flags</h3>
 <ul style="background: #1a1a1a; padding: 15px 15px 15px 30px; border-radius: 4px;">
 {flags_html}
@@ -599,7 +661,7 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", g
             json={
                 "from": "Undertow Index <onboarding@resend.dev>",
                 "to": [ALERT_EMAIL],
-                "subject": f"{emoji} Undertow Index — {signal} ({score}/23) — {datetime.datetime.now().strftime('%d %b %Y')}",
+                "subject": f"{emoji} Undertow Index — {signal} ({score}/{score_data['max']}) — {datetime.datetime.now().strftime('%d %b %Y')}",
                 "html": html
             },
             timeout=15
@@ -858,7 +920,7 @@ def main():
 
     print("[Layer 4] Computing composite score...")
     score_data = compute_score(l1, l2, l3, l3b, l3c, l3d)
-    print(f"\n  {score_data['emoji']} SIGNAL: {score_data['signal']} ({score_data['score']}/23)")
+    print(f"\n  {score_data['emoji']} SIGNAL: {score_data['signal']} ({score_data['score']}/{score_data['max']})")
     print(f"  {score_data['summary']}")
 
     for flag in l1["flags"] + l2["flags"] + l3["flags"]:
@@ -888,7 +950,7 @@ def main():
         glint_html = "💎 Glint screen unavailable today."
 
     print("\n[Layer 7] Sending email report...")
-    send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html, glint_html)
+    send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html, glint_html, sanity_warnings)
 
     print("\n" + "=" * 60)
     print("UNDERTOW INDEX — COMPLETE")
