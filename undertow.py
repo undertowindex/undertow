@@ -487,9 +487,9 @@ LIVING MASTERS:
 5. Howard Marks — risk assessment, market psychology
 6. Paul Tudor Jones — technical macro, crisis anticipation
 7. Jeffrey Gundlach — fixed income, macro flows
-8. Lee Robinson — event-driven macro, credit dislocations
+8. David Tepper — buying panics, aggressive risk-on at extremes
 9. Nassim Taleb — tail risk, fragility, black swans
-10. Jim Rogers — global commodities, long-cycle macro
+10. Peter Lynch — bottom-up stock picking, stay-invested optimism
 11. George Soros — reflexivity, currency macro bets
 12. Jim Simons — quantitative pattern detection
 
