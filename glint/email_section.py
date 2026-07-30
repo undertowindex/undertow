@@ -12,6 +12,10 @@ def build_glint_section(results_with_fundamentals):
     for r, f in candidates:
         price = f"${f.price:,.2f}" if f.price is not None else "n/a"
         lines.append(f"  {r.ticker:<6} {(f.sector or 'Sector unknown'):<20} {price:>12}  score {r.value_score}/3")
+        if f.fifty_two_week_low is not None and f.fifty_two_week_high is not None:
+            pct = f.price_position_pct
+            pct_str = f"{pct:.0f}% up from the low" if pct is not None else "n/a"
+            lines.append(f"      52-wk range ${f.fifty_two_week_low:,.2f} – ${f.fifty_two_week_high:,.2f} ({pct_str})")
         for reason in r.value_reasons:
             lines.append(f"      • {reason}")
         lines.append("")

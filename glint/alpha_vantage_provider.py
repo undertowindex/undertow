@@ -97,4 +97,6 @@ class AlphaVantageProvider(DataProvider):
             total_equity=total_equity,
             debt_to_equity=debt_to_equity,
             net_income_history=net_income_history,
+            fifty_two_week_low=_to_float(overview.get("52WeekLow")),
+            fifty_two_week_high=_to_float(overview.get("52WeekHigh")),
         )

@@ -30,6 +30,21 @@ class CompanyFundamentals:
 
     net_income_history: list[float] = field(default_factory=list)
 
+    fifty_two_week_low: float | None = None
+    fifty_two_week_high: float | None = None
+
+    @property
+    def price_position_pct(self) -> float | None:
+        """Where the current price sits in its 52-week range: 0 = at the
+        low, 100 = at the high. Just context on how far off recent lows a
+        candidate is — not an entry signal or a recommendation."""
+        if self.price is None or self.fifty_two_week_low is None or self.fifty_two_week_high is None:
+            return None
+        spread = self.fifty_two_week_high - self.fifty_two_week_low
+        if spread <= 0:
+            return None
+        return (self.price - self.fifty_two_week_low) / spread * 100
+
 
 class DataProvider(ABC):
     @abstractmethod

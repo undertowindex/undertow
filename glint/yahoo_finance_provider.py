@@ -60,4 +60,6 @@ class YahooFinanceProvider(DataProvider):
             total_equity=total_equity,
             debt_to_equity=debt_to_equity,
             net_income_history=net_income_history,
+            fifty_two_week_low=info.get("fiftyTwoWeekLow"),
+            fifty_two_week_high=info.get("fiftyTwoWeekHigh"),
         )
