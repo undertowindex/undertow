@@ -35,7 +35,10 @@ def yf_download_with_retry(tickers, retries=3, backoff_seconds=3, **kwargs):
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 FRED_API_KEY = os.environ.get("FRED_API_KEY", "")
 RESEND_API_KEY = os.environ.get("SENDGRID_API_KEY", "")
-ALERT_EMAIL = os.environ.get("ALERT_EMAIL", "micahbrown4@me.com")
+# Comma-separated. Gmail copy exists so Claude (connected to that
+# account) can review the daily emails directly during testing.
+ALERT_EMAIL = os.environ.get("ALERT_EMAIL", "micahbrown4@me.com,micah.brown7@gmail.com")
+ALERT_EMAILS = [e.strip() for e in ALERT_EMAIL.split(",") if e.strip()]
 
 # ─────────────────────────────────────────────
 def fred_get(series_id, retries=3, backoff_seconds=2):
@@ -754,14 +757,14 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", g
             },
             json={
                 "from": "Undertow Index <onboarding@resend.dev>",
-                "to": [ALERT_EMAIL],
+                "to": ALERT_EMAILS,
                 "subject": f"{emoji} Undertow Index — {signal} ({score}/{score_data['max']}) — {datetime.datetime.now().strftime('%d %b %Y')}",
                 "html": html
             },
             timeout=15
         )
         if response.status_code == 200:
-            print(f"✅ Email sent to {ALERT_EMAIL}")
+            print(f"✅ Email sent to {', '.join(ALERT_EMAILS)}")
         else:
             print(f"❌ Email failed: {response.status_code} — {response.text}")
     except Exception as e:
