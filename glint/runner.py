@@ -2,15 +2,14 @@ import os
 
 from glint.data_provider import get_provider
 from glint.screener import screen
-
-DEFAULT_WATCHLIST = ["ADBE", "AAPL", "KO"]
+from glint.watchlist import WATCHLIST
 
 
 def _get_watchlist():
     raw = os.environ.get("GLINT_WATCHLIST", "")
     if raw.strip():
         return [t.strip().upper() for t in raw.split(",") if t.strip()]
-    return DEFAULT_WATCHLIST
+    return WATCHLIST
 
 
 def run_glint(watchlist=None):

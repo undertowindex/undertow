@@ -38,7 +38,11 @@ class DataProvider(ABC):
 
 
 def get_provider() -> DataProvider:
-    provider_name = os.environ.get("GLINT_DATA_PROVIDER", "alpha_vantage")
+    provider_name = os.environ.get("GLINT_DATA_PROVIDER", "yahoo_finance")
+
+    if provider_name == "yahoo_finance":
+        from glint.yahoo_finance_provider import YahooFinanceProvider
+        return YahooFinanceProvider()
 
     if provider_name == "alpha_vantage":
         from glint.alpha_vantage_provider import AlphaVantageProvider
