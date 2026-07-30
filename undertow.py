@@ -509,6 +509,9 @@ CRITICAL: There are exactly 17 members listed above. Each member must appear exa
 
 CRITICAL - ORDERING: Write the members in STRICT sequential order, 1 through 17, exactly as numbered in the list above. Fully complete each member's entire entry (their view AND their vote) before starting the next numbered member. Do NOT interleave, interrupt, or jump ahead to a later-numbered member mid-way through an earlier one. Do NOT go back to an earlier number after moving on. Before outputting your final answer, verify the member numbers appear in ascending order with no gaps, repeats, or interruptions.
 
+CRITICAL - MACHINE-READABLE TALLY: After everything else, on its own final line with nothing else on it, output exactly this format with the real integer counts from the panel above (no extra words, no markdown formatting on this line):
+TALLY: CONFIRM=<n> UPGRADE=<n> DOWNGRADE=<n>
+
 Format clearly with each member's name bolded."""
 
     try:
@@ -533,14 +536,79 @@ Format clearly with each member's name bolded."""
     except Exception as e:
         return f"Boardroom error: {e}"
 
+
+def parse_boardroom_tally(boardroom_text):
+    """Pulls the machine-readable 'TALLY: CONFIRM=n UPGRADE=n DOWNGRADE=n'
+    line out of the Boardroom's free text. Returns None if it's missing or
+    malformed, so callers can fall back to the composite score alone
+    rather than trust a bad parse."""
+    import re
+    match = re.search(r"TALLY:\s*CONFIRM=(\d+)\s*UPGRADE=(\d+)\s*DOWNGRADE=(\d+)", boardroom_text)
+    if not match:
+        return None
+    confirm, upgrade, downgrade = (int(g) for g in match.groups())
+    if confirm + upgrade + downgrade != 17:
+        return None
+    return {"confirm": confirm, "upgrade": upgrade, "downgrade": downgrade}
+
+
+SIGNAL_LEVELS = ["GREEN", "AMBER", "RED"]
+SIGNAL_EMOJI = {"GREEN": "🟢", "AMBER": "🟡", "RED": "🔴"}
+
+
+def apply_boardroom_override(score_data, tally):
+    """The composite score alone used to be the entire headline signal,
+    with the Boardroom's vote sitting underneath as commentary that could
+    never move it - even a 13-4 majority to escalate had zero effect on
+    what the top of the email said. This makes a real majority (9+ of 17)
+    actually move the headline one level, and always says plainly whether
+    an override happened, rather than silently picking one number."""
+    base_signal = score_data["signal"]
+    result = {
+        "signal": base_signal,
+        "emoji": SIGNAL_EMOJI[base_signal],
+        "overridden": False,
+        "override_note": None,
+    }
+
+    if tally is None:
+        result["override_note"] = "Boardroom tally unavailable — showing the composite score's signal only."
+        return result
+
+    idx = SIGNAL_LEVELS.index(base_signal)
+    if tally["upgrade"] >= 9 and idx < len(SIGNAL_LEVELS) - 1:
+        new_signal = SIGNAL_LEVELS[idx + 1]
+        result["signal"] = new_signal
+        result["emoji"] = SIGNAL_EMOJI[new_signal]
+        result["overridden"] = True
+        result["override_note"] = (
+            f"Composite score alone says {base_signal}, but the Boardroom voted "
+            f"{tally['upgrade']}-{tally['confirm']} (upgrade-confirm, {tally['downgrade']} downgrade) "
+            f"to escalate — today's signal is {new_signal}."
+        )
+    elif tally["downgrade"] >= 9 and idx > 0:
+        new_signal = SIGNAL_LEVELS[idx - 1]
+        result["signal"] = new_signal
+        result["emoji"] = SIGNAL_EMOJI[new_signal]
+        result["overridden"] = True
+        result["override_note"] = (
+            f"Composite score alone says {base_signal}, but the Boardroom voted "
+            f"{tally['downgrade']}-{tally['confirm']} (downgrade-confirm, {tally['upgrade']} upgrade) "
+            f"to de-escalate — today's signal is {new_signal}."
+        )
+    return result
+
 # ─────────────────────────────────────────────
 # LAYER 6: TRADE IDEAS
 # ─────────────────────────────────────────────
-def get_trade_ideas(score_data, l1, l2, l3):
+def get_trade_ideas(score_data, l1, l2, l3, effective_signal=None):
     if not ANTHROPIC_API_KEY:
         return "Trade ideas unavailable — no API key."
 
-    signal = score_data["signal"]
+    # Use the Boardroom-adjusted signal if one was computed, so trade
+    # ideas match whatever signal actually appears in the email headline
+    # rather than the pre-Boardroom composite signal alone.
+    signal = effective_signal or score_data["signal"]
     score = score_data["score"]
     all_flags = l1["flags"] + l2["flags"] + l3["flags"]
     flags_text = "\n".join(all_flags) if all_flags else "No flags."
@@ -590,15 +658,21 @@ Be specific. No waffle."""
 # ─────────────────────────────────────────────
 # LAYER 7: EMAIL via RESEND
 # ─────────────────────────────────────────────
-def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", glint_html="", sanity_warnings=None):
+def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", glint_html="", sanity_warnings=None, final_signal_data=None):
     if not RESEND_API_KEY:
         print("No Resend key — skipping email.")
         return
 
     date_str = datetime.datetime.now().strftime("%A %d %B %Y, %H:%M UTC")
-    signal = score_data["signal"]
-    emoji = score_data["emoji"]
     score = score_data["score"]
+
+    # The headline uses the Boardroom-adjusted signal when available (a
+    # real majority vote can move it one level from the composite score's
+    # signal); falls back to the composite signal alone if the Boardroom
+    # never ran or its tally couldn't be parsed.
+    final_signal_data = final_signal_data or {"signal": score_data["signal"], "emoji": score_data["emoji"], "overridden": False, "override_note": None}
+    signal = final_signal_data["signal"]
+    emoji = final_signal_data["emoji"]
 
     all_flags = l1["flags"] + l2["flags"] + l3["flags"]
     flags_html = "".join(f"<li>{f}</li>" for f in all_flags) if all_flags else "<li>No flags</li>"
@@ -615,6 +689,17 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", g
 </div>
 """
 
+    override_html = ""
+    if final_signal_data.get("override_note"):
+        override_color = "#f39c12" if final_signal_data["overridden"] else "#666"
+        override_label = "🏛️ Boardroom Override" if final_signal_data["overridden"] else "🏛️ Boardroom Note"
+        override_html = f"""
+<div style="background: #1a1a1a; border-left: 4px solid {override_color}; padding: 15px; margin: 20px 0; border-radius: 4px;">
+  <h3 style="margin: 0 0 8px 0; color: {override_color};">{override_label}</h3>
+  <p style="margin: 0;">{final_signal_data['override_note']}</p>
+</div>
+"""
+
     html = f"""
 <html><body style="font-family: Arial, sans-serif; max-width: 700px; margin: auto; background: #0d0d0d; color: #e0e0e0; padding: 20px;">
 <h1 style="color: {signal_color}; border-bottom: 2px solid {signal_color}; padding-bottom: 10px;">
@@ -622,9 +707,10 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", g
 </h1>
 <p style="color: #aaa;">{date_str}</p>
 <div style="background: #1a1a1a; border-left: 4px solid {signal_color}; padding: 15px; margin: 20px 0; border-radius: 4px;">
-  <h2 style="margin: 0; color: {signal_color};">Score: {score}/{score_data['max']}</h2>
+  <h2 style="margin: 0; color: {signal_color};">Composite score: {score}/{score_data['max']} ({score_data['signal']})</h2>
   <p style="margin: 8px 0 0 0;">{score_data['summary']}</p>
 </div>
+{override_html}
 {sanity_html}
 <h3 style="color: #f0c040;">⚡ Active Stress Flags</h3>
 <ul style="background: #1a1a1a; padding: 15px 15px 15px 30px; border-radius: 4px;">
@@ -930,8 +1016,15 @@ def main():
     boardroom = run_boardroom(score_data, l1, l2, l3)
     print(boardroom)
 
+    tally = parse_boardroom_tally(boardroom)
+    final_signal_data = apply_boardroom_override(score_data, tally)
+    if final_signal_data["overridden"]:
+        print(f"  🏛️  BOARDROOM OVERRIDE: {final_signal_data['override_note']}", flush=True)
+    elif final_signal_data["override_note"]:
+        print(f"  🏛️  {final_signal_data['override_note']}", flush=True)
+
     print("\n[Layer 6] Generating trade ideas...")
-    trade_ideas = get_trade_ideas(score_data, l1, l2, l3)
+    trade_ideas = get_trade_ideas(score_data, l1, l2, l3, effective_signal=final_signal_data["signal"])
     print(trade_ideas)
 
     print("\n[Layer 8] Pulling IBKR portfolio...")
@@ -950,7 +1043,7 @@ def main():
         glint_html = "💎 Glint screen unavailable today."
 
     print("\n[Layer 7] Sending email report...")
-    send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html, glint_html, sanity_warnings)
+    send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html, glint_html, sanity_warnings, final_signal_data)
 
     print("\n" + "=" * 60)
     print("UNDERTOW INDEX — COMPLETE")
