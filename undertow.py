@@ -37,7 +37,7 @@ FRED_API_KEY = os.environ.get("FRED_API_KEY", "")
 RESEND_API_KEY = os.environ.get("SENDGRID_API_KEY", "")
 # Comma-separated. Gmail copy exists so Claude (connected to that
 # account) can review the daily emails directly during testing.
-ALERT_EMAIL = os.environ.get("ALERT_EMAIL", "micahbrown4@me.com,micah.brown7@gmail.com")
+ALERT_EMAIL = os.environ.get("ALERT_EMAIL", "micahbrown4@me.com,micah.brown7@gmail.com,jakobgoulding@gmail.com")
 ALERT_EMAILS = [e.strip() for e in ALERT_EMAIL.split(",") if e.strip()]
 
 # ─────────────────────────────────────────────
