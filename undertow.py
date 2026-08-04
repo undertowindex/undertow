@@ -39,6 +39,50 @@ RESEND_API_KEY = os.environ.get("SENDGRID_API_KEY", "")
 # account) can review the daily emails directly during testing.
 ALERT_EMAIL = os.environ.get("ALERT_EMAIL", "micahbrown4@me.com,micah.brown7@gmail.com,jakobgoulding@gmail.com,olisbrown@gmail.com")
 ALERT_EMAILS = [e.strip() for e in ALERT_EMAIL.split(",") if e.strip()]
+# Ark handoff: lets Ark (running locally, not on Railway) pull today's real
+# signal automatically instead of Micah retyping it from the email. Micah
+# explicitly approved publishing this to a secret (unlisted) GitHub Gist as
+# the cross-machine bridge - see publish_ark_handoff() below.
+GITHUB_GIST_TOKEN = os.environ.get("GITHUB_GIST_TOKEN", "")
+ARK_HANDOFF_GIST_ID = os.environ.get("ARK_HANDOFF_GIST_ID", "")
+
+# ─────────────────────────────────────────────
+def publish_ark_handoff(ark_inputs, gist_id, token):
+    """Publishes ark_inputs to a secret GitHub Gist so Ark, running locally
+    rather than on Railway, can fetch today's real signal automatically
+    instead of it being typed in by hand. Gists are 'secret' (unlisted,
+    readable by anyone with the exact ID) rather than access-controlled -
+    acceptable here since the payload is a market signal plus already-public
+    tickers, not account data. Returns the gist ID (existing or newly
+    created) on success, or None on failure - callers must treat a failed
+    publish as "handoff did not happen," never assume it silently worked."""
+    if not token:
+        print("  ⚠️  GITHUB_GIST_TOKEN not set - skipping Ark handoff publish.", flush=True)
+        return None
+
+    payload = {**ark_inputs, "generated_at": datetime.datetime.utcnow().isoformat() + "Z"}
+    body = {
+        "description": "Undertow -> Ark signal handoff (auto-updated daily, do not edit by hand)",
+        "public": False,
+        "files": {"ark_inputs.json": {"content": json.dumps(payload, indent=2)}},
+    }
+    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}
+
+    try:
+        if gist_id:
+            r = requests.patch(f"https://api.github.com/gists/{gist_id}", json=body, headers=headers, timeout=15)
+        else:
+            r = requests.post("https://api.github.com/gists", json=body, headers=headers, timeout=15)
+        r.raise_for_status()
+        new_id = r.json()["id"]
+        if not gist_id:
+            print(f"  🔑 Created new Ark handoff gist: {new_id}", flush=True)
+            print(f"  🔑 Set ARK_HANDOFF_GIST_ID={new_id} in Railway (and in Ark's local env) "
+                  f"so future runs update this same gist and Ark can find it.", flush=True)
+        return new_id
+    except Exception as e:
+        print(f"  ⚠️  Failed to publish Ark handoff: {e}", flush=True)
+        return None
 
 # ─────────────────────────────────────────────
 def fred_get(series_id, retries=3, backoff_seconds=2):
@@ -1105,6 +1149,7 @@ def main():
         "glint_review_available": bool(glint_review),
     }
     print(f"ARK_INPUTS_JSON: {json.dumps(ark_inputs)}", flush=True)
+    publish_ark_handoff(ark_inputs, ARK_HANDOFF_GIST_ID, GITHUB_GIST_TOKEN)
 
     print("\n[Layer 7] Sending email report...")
     send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html, glint_html, sanity_warnings, final_signal_data, glint_review)
