@@ -85,7 +85,7 @@ def publish_ark_handoff(ark_inputs, gist_id, token):
         return None
 
 # ─────────────────────────────────────────────
-def fred_get(series_id, retries=3, backoff_seconds=2):
+def fred_get(series_id, retries=4, backoff_seconds=3):
     """Shared FRED API fetch with retry logic. Skips missing ('.') values
     and returns the most recent real observation as (value, date_str).
     Returns (None, None) if the series has no valid data or every attempt
@@ -99,7 +99,7 @@ def fred_get(series_id, retries=3, backoff_seconds=2):
 
     for attempt in range(1, retries + 1):
         try:
-            r = requests.get(url, params=params, timeout=10)
+            r = requests.get(url, params=params, timeout=20)
             r.raise_for_status()
             for o in r.json()["observations"]:
                 if o["value"] != ".":
