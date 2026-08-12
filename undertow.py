@@ -1,5 +1,6 @@
 import os
 import json
+import math
 import time
 import datetime
 import requests
@@ -367,7 +368,7 @@ def _check_freshness(warnings, label, date_str, max_age_days=5):
         warnings.append(f"{label} sanity: date {date_str!r} not parseable")
 
 
-def run_sanity_checks(l1, l2, l3, l3b, l3c, l3d):
+def run_sanity_checks(l1, l2, l3, l3b, l3c, l3d, l3e):
     warnings = []
 
     vix = l1["data"].get("vix")
@@ -427,7 +428,12 @@ def run_sanity_checks(l1, l2, l3, l3b, l3c, l3d):
     if skew_val is not None and not (80 <= skew_val <= 200):
         warnings.append(f"Layer 3d sanity: SKEW {skew_val} outside plausible range (80-200)")
 
-    for label, layer in [("Layer 1", l1), ("Layer 2", l2), ("Layer 3", l3), ("Layer 3b", l3b), ("Layer 3c", l3c), ("Layer 3d", l3d)]:
+    gex_bn = l3e["data"].get("net_gex_bn_per_1pct")
+    if gex_bn is not None and abs(gex_bn) > 100:
+        warnings.append(f"Layer 3e sanity: net GEX {gex_bn}bn per 1% outside plausible range (-100 to 100)")
+    _check_freshness(warnings, "Layer 3e (GEX)", l3e["data"].get("last_bar_date"), max_age_days=5)
+
+    for label, layer in [("Layer 1", l1), ("Layer 2", l2), ("Layer 3", l3), ("Layer 3b", l3b), ("Layer 3c", l3c), ("Layer 3d", l3d), ("Layer 3e", l3e)]:
         if not (0 <= layer["score"] <= layer["max"]):
             warnings.append(f"{label} sanity: score {layer['score']} outside valid range 0-{layer['max']}")
 
@@ -478,17 +484,128 @@ def get_layer3d():
 
     return {"score": score, "max": 2, "flags": flags, "data": data}
 
-def compute_score(l1, l2, l3, l3b, l3c, l3d):
-    # l3c is disabled (see get_layer3c) and always contributes 0/0, so the
-    # real max is 21, not 23. Thresholds rescaled down from 7/14 out of 23
-    # to 6/13 out of 21, matching the same proportion.
-    total = l1["score"] + l2["score"] + l3["score"] + l3b["score"] + l3c["score"] + l3d["score"]
 
-    if total <= 6:
+# ─────────────────────────────────────────────
+# LAYER 3e: DEALER GAMMA EXPOSURE (GEX)
+# ─────────────────────────────────────────────
+# Computed from the SPY options chain (yfinance, free, no key) rather than
+# a paid GEX feed. Standard dealer-positioning convention: dealers are
+# long calls, short puts. Positive net GEX = dealer hedging suppresses
+# volatility (shock absorber). Negative net GEX = the same hedging
+# amplifies moves (petrol on the fire) - a structural-fragility tremor.
+def _bs_gamma(spot, strike, iv, t_years, r=0.04):
+    """Black-Scholes gamma (identical for calls and puts)."""
+    if iv <= 0 or t_years <= 0 or spot <= 0 or strike <= 0:
+        return 0.0
+    d1 = (math.log(spot / strike) + (r + 0.5 * iv * iv) * t_years) / (iv * math.sqrt(t_years))
+    pdf = math.exp(-0.5 * d1 * d1) / math.sqrt(2 * math.pi)
+    return pdf / (spot * iv * math.sqrt(t_years))
+
+
+def get_layer3e():
+    score = 0
+    flags = []
+    data = {}
+
+    try:
+        tk = yf.Ticker("SPY")
+        hist = tk.history(period="5d")
+        spot = float(hist["Close"].dropna().iloc[-1])
+        data["spy_spot"] = round(spot, 2)
+        data["last_bar_date"] = hist["Close"].dropna().index[-1].strftime("%Y-%m-%d")
+
+        today = datetime.date.today()
+        # SPY has daily expirations, so "first N in the window" would only
+        # ever sample the front week. Instead pick the expiration closest
+        # to each of ~1wk / 2wk / 1mo / 2mo out, so the measure spans the
+        # window and includes the heavyweight monthly expirations.
+        window = []
+        for exp in tk.options:
+            dte = (datetime.datetime.strptime(exp, "%Y-%m-%d").date() - today).days
+            if 5 <= dte <= 60:
+                window.append((exp, dte))
+        # Force-include monthly OPEX expirations (third Fridays) - that is
+        # where the heavyweight dealer books sit - then add a front-week
+        # and a couple of spread-out picks around them.
+        def _is_third_friday(exp_str):
+            d = datetime.datetime.strptime(exp_str, "%Y-%m-%d").date()
+            return d.weekday() == 4 and 15 <= d.day <= 21
+
+        expirations = [x for x in window if _is_third_friday(x[0])]
+        for target in (7, 14, 45):
+            if not window:
+                break
+            pick = min(window, key=lambda x: abs(x[1] - target))
+            if pick not in expirations:
+                expirations.append(pick)
+        expirations.sort(key=lambda x: x[1])
+        expirations = expirations[:6]
+
+        net_gex = 0.0   # $ change in dealer delta-hedge demand per 1% SPY move
+        gross_gex = 0.0
+        contracts_used = 0
+        side_counts = {1: 0, -1: 0}  # calls / puts actually contributing
+        for exp, dte in expirations:
+            chain = tk.option_chain(exp)
+            t_years = dte / 365.0
+            for df, sign in ((chain.calls, 1), (chain.puts, -1)):
+                for strike, iv, oi in zip(df["strike"], df["impliedVolatility"], df["openInterest"]):
+                    try:
+                        strike, iv, oi = float(strike), float(iv), float(oi)
+                    except (TypeError, ValueError):
+                        continue
+                    if not (oi > 0 and 0.01 < iv < 5):
+                        continue
+                    gamma = _bs_gamma(spot, strike, iv, t_years)
+                    dollar_gamma = gamma * oi * 100 * spot * spot * 0.01
+                    net_gex += sign * dollar_gamma
+                    gross_gex += abs(dollar_gamma)
+                    contracts_used += 1
+                    side_counts[sign] += 1
+
+        if contracts_used < 100 or gross_gex <= 0:
+            flags.append(f"Layer 3e GEX: insufficient usable options data ({contracts_used} contracts) - scoring 0 today")
+            return {"score": 0, "max": 2, "flags": flags, "data": data}
+
+        normalized = net_gex / gross_gex  # -1 (all-put) .. +1 (all-call)
+        data["net_gex_bn_per_1pct"] = round(net_gex / 1e9, 2)
+        data["gex_normalized"] = round(normalized, 3)
+        data["gex_contracts_used"] = contracts_used
+        data["gex_calls_used"] = side_counts[1]
+        data["gex_puts_used"] = side_counts[-1]
+        data["gex_expirations"] = [e for e, _ in expirations]
+
+        # Data-quality guard: if one whole side of the market has gone
+        # dark (bad Yahoo IV/OI fields), the net number is not a real
+        # positioning measure - keep the data visible but score 0.
+        lopsided = min(side_counts.values()) < 0.2 * max(side_counts.values())
+        if lopsided:
+            flags.append(f"Layer 3e GEX data quality: lopsided chain data (calls {side_counts[1]} / puts {side_counts[-1]} usable) - net GEX unreliable today, scoring 0")
+            return {"score": 0, "max": 2, "flags": flags, "data": data}
+
+        if net_gex <= 0 and normalized < -0.10:
+            score += 2
+            flags.append(f"Dealer gamma DEEPLY NEGATIVE ({net_gex/1e9:.1f}bn per 1% move) - dealer hedging is amplifying market moves")
+        elif net_gex <= 0:
+            score += 1
+            flags.append(f"Dealer gamma negative ({net_gex/1e9:.1f}bn per 1% move) - volatility-amplifying regime")
+    except Exception as e:
+        flags.append(f"Layer 3e GEX error: {e}")
+
+    return {"score": score, "max": 2, "flags": flags, "data": data}
+
+def compute_score(l1, l2, l3, l3b, l3c, l3d, l3e):
+    # l3c is disabled (see get_layer3c) and always contributes 0/0. With
+    # Layer 3e (dealer gamma, max 2) added Aug 2026, the live max is 23.
+    # Thresholds at 7/14 out of 23 - same proportions as the previous
+    # 6/13 out of 21.
+    total = l1["score"] + l2["score"] + l3["score"] + l3b["score"] + l3c["score"] + l3d["score"] + l3e["score"]
+
+    if total <= 7:
         signal = "GREEN"
         emoji = "🟢"
         summary = "Markets calm. No significant stress signals detected."
-    elif total <= 13:
+    elif total <= 14:
         signal = "AMBER"
         emoji = "🟡"
         summary = "Elevated risk. Multiple stress signals present. Watch closely."
@@ -497,7 +614,7 @@ def compute_score(l1, l2, l3, l3b, l3c, l3d):
         emoji = "🔴"
         summary = "High alert. Significant macro stress across multiple indicators."
 
-    return {"score": total, "max": 21, "signal": signal, "emoji": emoji, "summary": summary}
+    return {"score": total, "max": 23, "signal": signal, "emoji": emoji, "summary": summary}
 
 # ─────────────────────────────────────────────
 # LAYER 5: THE BOARDROOM
@@ -709,7 +826,7 @@ Be specific. No waffle."""
 # ─────────────────────────────────────────────
 # LAYER 7: EMAIL via RESEND
 # ─────────────────────────────────────────────
-def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", glint_html="", sanity_warnings=None, final_signal_data=None, glint_review=""):
+def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", glint_html="", sanity_warnings=None, final_signal_data=None, glint_review="", extra_flags=None):
     if not RESEND_API_KEY:
         print("No Resend key — skipping email.")
         return
@@ -725,7 +842,7 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", g
     signal = final_signal_data["signal"]
     emoji = final_signal_data["emoji"]
 
-    all_flags = l1["flags"] + l2["flags"] + l3["flags"]
+    all_flags = l1["flags"] + l2["flags"] + l3["flags"] + (extra_flags or [])
     flags_html = "".join(f"<li>{f}</li>" for f in all_flags) if all_flags else "<li>No flags</li>"
     signal_color = {"GREEN": "#2ecc71", "AMBER": "#f39c12", "RED": "#e74c3c"}.get(signal, "#999")
 
@@ -1051,8 +1168,12 @@ def main():
     l3d = get_layer3d()
     print(f"  Score: {l3d['score']}/{l3d['max']} | Flags: {len(l3d['flags'])}", flush=True)
 
+    print("[Layer 3e] Dealer gamma exposure (GEX)...", flush=True)
+    l3e = get_layer3e()
+    print(f"  Score: {l3e['score']}/{l3e['max']} | Flags: {len(l3e['flags'])}", flush=True)
+
     print("[Self-Test] Running sanity checks...", flush=True)
-    sanity_warnings = run_sanity_checks(l1, l2, l3, l3b, l3c, l3d)
+    sanity_warnings = run_sanity_checks(l1, l2, l3, l3b, l3c, l3d, l3e)
     if sanity_warnings:
         for w in sanity_warnings:
             print(f"  🚨 {w}", flush=True)
@@ -1060,7 +1181,7 @@ def main():
         print("  All checks passed.", flush=True)
 
     print("[Layer 4] Computing composite score...")
-    score_data = compute_score(l1, l2, l3, l3b, l3c, l3d)
+    score_data = compute_score(l1, l2, l3, l3b, l3c, l3d, l3e)
     print(f"\n  {score_data['emoji']} SIGNAL: {score_data['signal']} ({score_data['score']}/{score_data['max']})")
     print(f"  {score_data['summary']}")
 
@@ -1080,10 +1201,10 @@ def main():
         print(f"  ⚠️  Glint screen failed, skipping section: {e}", flush=True)
         glint_html = "💎 Glint screen unavailable today."
 
-    all_flags = l1["flags"] + l2["flags"] + l3["flags"] + l3b["flags"] + l3d["flags"]
+    all_flags = l1["flags"] + l2["flags"] + l3["flags"] + l3b["flags"] + l3d["flags"] + l3e["flags"]
     flags_text = "\n".join(all_flags) if all_flags else "No flags raised."
     raw_data = {**l1.get("data", {}), **l2.get("data", {}), **l3.get("data", {}),
-                **l3b.get("data", {}), **l3d.get("data", {})}
+                **l3b.get("data", {}), **l3d.get("data", {}), **l3e.get("data", {})}
     data_text = json.dumps(raw_data, indent=2)
 
     run_full, mode_reason = should_run_full_research(score_data["signal"])
@@ -1152,7 +1273,7 @@ def main():
     publish_ark_handoff(ark_inputs, ARK_HANDOFF_GIST_ID, GITHUB_GIST_TOKEN)
 
     print("\n[Layer 7] Sending email report...")
-    send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html, glint_html, sanity_warnings, final_signal_data, glint_review)
+    send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html, glint_html, sanity_warnings, final_signal_data, glint_review, extra_flags=l3b["flags"] + l3d["flags"] + l3e["flags"])
 
     print("\n" + "=" * 60)
     print("UNDERTOW INDEX — COMPLETE")
