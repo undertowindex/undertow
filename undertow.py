@@ -628,7 +628,9 @@ def run_boardroom(score_data, l1, l2, l3):
     raw_data = {**l1.get("data", {}), **l2.get("data", {}), **l3.get("data", {})}
     data_text = json.dumps(raw_data, indent=2)
 
-    prompt = f"""You are running The Boardroom — a council of the world's greatest investors and traders.
+    board_today = datetime.date.today().strftime("%A %d %B %Y")
+
+    prompt = f"""You are running The Boardroom — a council of the world's greatest investors and traders. Today's date is {board_today}. Your training data may end before this date - trust this date and, where relevant, your web search results for current events.
 
 Current Undertow Index reading:
 - Score: {score_data['score']}/{score_data['max']}
@@ -781,7 +783,9 @@ def get_trade_ideas(score_data, l1, l2, l3, effective_signal=None):
     all_flags = l1["flags"] + l2["flags"] + l3["flags"]
     flags_text = "\n".join(all_flags) if all_flags else "No flags."
 
-    prompt = f"""You are Michael Burry's trading desk AI. Current Undertow signal: {signal} ({score}/{score_data['max']}).
+    today_str = datetime.date.today().strftime("%A %d %B %Y")
+
+    prompt = f"""You are Michael Burry's trading desk AI. Today's date is {today_str}. Current Undertow signal: {signal} ({score}/{score_data['max']}).
 
 Active flags:
 {flags_text}
@@ -799,6 +803,8 @@ Focus on asymmetric bets — cheap options, underpriced tail risk, or obvious co
 For GREEN: opportunistic longs, vol selling.
 For AMBER: hedges, defensive rotation, small put positions.
 For RED: aggressive downside plays, safe haven longs, crisis positioning.
+
+CRITICAL - DATES: Today is {today_str}. Your training data may end before this date - trust the date given here, not your memory. Every option expiry, target date, or time horizon you mention MUST be a real, tradeable date IN THE FUTURE relative to today (typically 30-180 days out). Never suggest an expiry that has already passed. For monthly options, expiries are the third Friday of the month.
 
 Be specific. No waffle."""
 
