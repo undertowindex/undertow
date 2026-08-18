@@ -229,15 +229,39 @@ def build_trade_ideas(today, quality_survivors):
                 "rationale": "Tech-weighted hedge alongside SPY, since concentration risk usually shows up there first.",
             },
             {
-                "instrument": "VIX calls (12-18mo)",
-                "rationale": "Convexity play — VIX calls are cheapest exactly when nobody wants them, which is now.",
+                "instrument": "IWM long-dated put (12-18mo)",
+                "rationale": (
+                    "Small-cap hedge. Small caps are higher-beta and tend to "
+                    "fall hardest in a broad selloff, so an IWM put adds "
+                    "downside breadth beyond the large-cap SPY/QQQ names."
+                ),
+            },
+            {
+                "instrument": "HYG put or credit hedge (12-18mo)",
+                "rationale": (
+                    "Credit hedge. High-yield bonds (HYG) crack early when "
+                    "stress builds — a put here captures the credit leg of a "
+                    "downturn that pure equity puts miss. Ties directly to "
+                    "Undertow's own credit-spread layer flashing."
+                ),
+            },
+            {
+                "instrument": "VIX call spread (12-18mo)",
+                "rationale": (
+                    "Convexity play — VIX calls are cheapest exactly when "
+                    "nobody wants them, which is now. Structured as a call "
+                    "SPREAD (buy lower strike, sell higher) to cap the premium "
+                    "paid, since outright VIX calls bleed hard if the spike "
+                    "doesn't come."
+                ),
             },
         ],
-        "shorts_gap": (
-            "Individual overvalued-stock shorts are part of the original design but "
-            "have no data feed yet — Glint only screens for undervalued names. "
-            "Building an 'overvalued/weak balance sheet' screener is the next "
-            "logical addition if you want size, not just speed, on the short side."
+        "shorts_note": (
+            "By design, Ark's short/insurance side is INDEX-ONLY — broad hedges "
+            "(equity indices, small caps, credit) plus VIX convexity. Individual "
+            "single-stock shorts are deliberately excluded: unbounded loss, borrow "
+            "cost, and squeeze risk make them a different risk class, and a weak "
+            "name can stay overvalued for years. Speed and defined risk over size."
         ),
         "longs": [],
     }
@@ -375,7 +399,7 @@ def render_report(today, window, prev_score, ideas, state, dry_run):
             lines.append(f"  • {s['instrument']}")
             lines.append(f"      {s['rationale']}")
         lines.append("")
-        lines.append(f"  Note: {ideas['shorts_gap']}")
+        lines.append(f"  Note: {ideas['shorts_note']}")
         lines.append("")
         lines.append("Longs (quality survivors from Glint):")
         if ideas["longs"]:
