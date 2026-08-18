@@ -41,6 +41,13 @@ GITHUB_GIST_TOKEN = os.environ.get("GITHUB_GIST_TOKEN", "")
 ARK_HANDOFF_GIST_ID = os.environ.get("ARK_HANDOFF_GIST_ID", "")
 GIST_FILENAME = "ark_inputs.json"
 
+# Where Ark keeps its state (history + open advisory positions).
+# If ARK_STATE_GIST_ID is set (as on Railway, where the container's disk is
+# wiped between runs), state lives in a secret Gist. If unset (running
+# locally on the Mac), state stays in the local file exactly as before.
+ARK_STATE_GIST_ID = os.environ.get("ARK_STATE_GIST_ID", "")
+STATE_GIST_FILENAME = "ark_state.json"
+
 # Where Ark keeps its own memory of past runs and open advisory positions.
 # Override with ARK_STATE_PATH if you ever want it somewhere else.
 STATE_PATH = Path(os.environ.get("ARK_STATE_PATH", str(Path.home() / "undertow" / "ark_state.json")))
@@ -97,7 +104,49 @@ def fetch_ark_inputs():
 # ---------------------------------------------------------------------------
 # Local state (Ark's own memory — separate from anything on Railway)
 # ---------------------------------------------------------------------------
+def _state_gist_request(method, payload=None):
+    url = f"https://api.github.com/gists/{ARK_STATE_GIST_ID}"
+    headers = {
+        "Authorization": f"token {GITHUB_GIST_TOKEN}",
+        "Accept": "application/vnd.github+json",
+    }
+    r = requests.request(method, url, headers=headers, json=payload, timeout=15)
+    r.raise_for_status()
+    return r.json()
+
+
+def _load_state_from_gist():
+    try:
+        gist = _state_gist_request("GET")
+    except requests.exceptions.RequestException as e:
+        # Deliberately fatal: if we can't READ existing state, starting
+        # "fresh" would wipe open positions the moment we saved. Better to
+        # skip a day than lose the position book.
+        print(f"❌ Could not reach the Ark state Gist: {e}")
+        sys.exit(1)
+    files = gist.get("files", {})
+    if STATE_GIST_FILENAME not in files:
+        print("⚠️  State Gist has no ark_state.json yet — starting with fresh state.")
+        return {"history": [], "open_positions": []}
+    try:
+        return json.loads(files[STATE_GIST_FILENAME]["content"])
+    except (KeyError, json.JSONDecodeError):
+        print("⚠️  State Gist content was unreadable — starting with fresh state.")
+        return {"history": [], "open_positions": []}
+
+
+def _save_state_to_gist(state):
+    payload = {"files": {STATE_GIST_FILENAME: {"content": json.dumps(state, indent=2)}}}
+    try:
+        _state_gist_request("PATCH", payload)
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Could not save state to the Ark state Gist: {e}")
+        sys.exit(1)
+
+
 def load_state():
+    if ARK_STATE_GIST_ID:
+        return _load_state_from_gist()
     if not STATE_PATH.exists():
         return {"history": [], "open_positions": []}
     try:
@@ -108,6 +157,9 @@ def load_state():
 
 
 def save_state(state):
+    if ARK_STATE_GIST_ID:
+        _save_state_to_gist(state)
+        return
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     STATE_PATH.write_text(json.dumps(state, indent=2))
 
@@ -423,7 +475,8 @@ def main():
         save_state(state)
         report_path = save_report(report, today_date_str)
         print(f"\nSaved report to {report_path}")
-        print(f"Saved state to {STATE_PATH}")
+        state_dest = f"Gist {ARK_STATE_GIST_ID}" if ARK_STATE_GIST_ID else str(STATE_PATH)
+        print(f"Saved state to {state_dest}")
         send_ark_email(report, window, today_date_str)
 
 
