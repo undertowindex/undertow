@@ -314,6 +314,21 @@ def record_new_advisory(state, today_date_str, ideas):
 # Report rendering
 # ---------------------------------------------------------------------------
 def render_report(today, window, prev_score, ideas, state, dry_run):
+    score = today["composite"]["score"]
+    max_score = today["composite"]["max"]
+
+    # On CALM days Ark has nothing to act on, so keep the email to a single
+    # line — the subject already carries "CALM" and the date. Ark should only
+    # be verbose on days it actually has something to say (WATCH/ACT/TOO_LATE).
+    # The one exception: if there are open advisory positions being tracked,
+    # fall through to the full report so those never get hidden on a calm day.
+    open_positions = [p for p in state["open_positions"] if p["status"] != "closed"]
+    if window == "calm" and not open_positions:
+        line = f"🟢 CALM — nothing to do. Undertow {score}/{max_score}, GREEN and flat/falling."
+        if dry_run:
+            line += "  (dry run — no state written)"
+        return line
+
     lines = []
     ts = today.get("generated_at", "unknown")
     lines.append("=" * 64)
@@ -322,8 +337,6 @@ def render_report(today, window, prev_score, ideas, state, dry_run):
     lines.append("=" * 64)
     lines.append("")
 
-    score = today["composite"]["score"]
-    max_score = today["composite"]["max"]
     signal = today["composite"]["signal"]
     lines.append(f"Composite score: {score}/{max_score}  |  Signal: {signal}")
     if prev_score is not None:
@@ -379,7 +392,6 @@ def render_report(today, window, prev_score, ideas, state, dry_run):
         )
         lines.append("")
 
-    open_positions = [p for p in state["open_positions"] if p["status"] != "closed"]
     if open_positions:
         lines.append("--- Open advisory positions Ark is tracking ---")
         for i, p in enumerate(open_positions, 1):
