@@ -701,6 +701,11 @@ Format clearly with each member's name bolded."""
             timeout=150
         )
         data = response.json()
+        # Log token usage
+        usage = data.get("usage", {})
+        input_tokens = usage.get("input_tokens", 0)
+        output_tokens = usage.get("output_tokens", 0)
+        print(f"[Boardroom] Tokens used: input={input_tokens}, output={output_tokens}")
         text_blocks = [b["text"] for b in data.get("content", []) if b.get("type") == "text"]
         return "\n".join(text_blocks)
     except Exception as e:
@@ -824,6 +829,11 @@ Be specific. No waffle."""
             timeout=45
         )
         data = response.json()
+        # Log token usage
+        usage = data.get("usage", {})
+        input_tokens = usage.get("input_tokens", 0)
+        output_tokens = usage.get("output_tokens", 0)
+        print(f"[Trade Ideas] Tokens used: input={input_tokens}, output={output_tokens}")
         text_blocks = [b["text"] for b in data.get("content", []) if b.get("type") == "text"]
         return "\n".join(text_blocks)
     except Exception as e:
