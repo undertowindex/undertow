@@ -619,6 +619,49 @@ def compute_score(l1, l2, l3, l3b, l3c, l3d, l3e):
 # ─────────────────────────────────────────────
 # LAYER 5: THE BOARDROOM
 # ─────────────────────────────────────────────
+def call_anthropic_text(payload, timeout, label):
+    """POST to the Anthropic messages API and return the joined text blocks.
+    Raises on an error response or an empty body - both used to come back
+    as an empty string, which rendered as a blank email section with no
+    tally and no visible failure (the same silent-failure mode as a layer
+    defaulting to calm). Retries once on transient statuses."""
+    last_error = None
+    for attempt in range(2):
+        try:
+            response = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": ANTHROPIC_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json"
+                },
+                json=payload,
+                timeout=timeout,
+            )
+        except requests.exceptions.RequestException as e:
+            last_error = f"request failed: {e}"
+            time.sleep(5)
+            continue
+        if response.status_code in (429, 500, 502, 503, 529) and attempt == 0:
+            last_error = f"HTTP {response.status_code}"
+            time.sleep(10)
+            continue
+        data = response.json()
+        if not response.ok or data.get("type") == "error":
+            err = data.get("error", {})
+            raise RuntimeError(
+                f"API error (HTTP {response.status_code}): "
+                f"{err.get('type', 'unknown')} - {err.get('message', json.dumps(data)[:200])}"
+            )
+        usage = data.get("usage", {})
+        print(f"[{label}] Tokens used: input={usage.get('input_tokens', 0)}, output={usage.get('output_tokens', 0)}")
+        text = "\n".join(b["text"] for b in data.get("content", []) if b.get("type") == "text")
+        if not text.strip():
+            raise RuntimeError("API returned HTTP 200 but no text content")
+        return text
+    raise RuntimeError(f"API unreachable after retries ({last_error})")
+
+
 def run_boardroom(score_data, l1, l2, l3):
     if not ANTHROPIC_API_KEY:
         return "Boardroom unavailable — no API key."
@@ -685,29 +728,16 @@ TALLY: CONFIRM=<n> UPGRADE=<n> DOWNGRADE=<n>
 Format clearly with each member's name bolded."""
 
     try:
-        response = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json"
-            },
-            json={
+        return call_anthropic_text(
+            {
                 "model": "claude-sonnet-4-6",
                 "max_tokens": 4500,
                 "tools": [{"type": "web_search_20250305", "name": "web_search"}],
                 "messages": [{"role": "user", "content": prompt}]
             },
-            timeout=150
+            timeout=150,
+            label="Boardroom",
         )
-        data = response.json()
-        # Log token usage
-        usage = data.get("usage", {})
-        input_tokens = usage.get("input_tokens", 0)
-        output_tokens = usage.get("output_tokens", 0)
-        print(f"[Boardroom] Tokens used: input={input_tokens}, output={output_tokens}")
-        text_blocks = [b["text"] for b in data.get("content", []) if b.get("type") == "text"]
-        return "\n".join(text_blocks)
     except Exception as e:
         return f"Boardroom error: {e}"
 
@@ -814,28 +844,15 @@ CRITICAL - DATES: Today is {today_str}. Your training data may end before this d
 Be specific. No waffle."""
 
     try:
-        response = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json"
-            },
-            json={
+        return call_anthropic_text(
+            {
                 "model": "claude-sonnet-4-6",
                 "max_tokens": 1000,
                 "messages": [{"role": "user", "content": prompt}]
             },
-            timeout=45
+            timeout=45,
+            label="Trade Ideas",
         )
-        data = response.json()
-        # Log token usage
-        usage = data.get("usage", {})
-        input_tokens = usage.get("input_tokens", 0)
-        output_tokens = usage.get("output_tokens", 0)
-        print(f"[Trade Ideas] Tokens used: input={input_tokens}, output={output_tokens}")
-        text_blocks = [b["text"] for b in data.get("content", []) if b.get("type") == "text"]
-        return "\n".join(text_blocks)
     except Exception as e:
         return f"Trade ideas error: {e}"
 
@@ -1264,6 +1281,14 @@ def main():
     print("\n[Layer 6] Generating trade ideas...")
     trade_ideas = get_trade_ideas(score_data, l1, l2, l3, effective_signal=final_signal_data["signal"])
     print(trade_ideas)
+
+    # A failed LLM call must land in the red warnings box - rendered as a
+    # blank section it reads as "nothing to report", which let an API
+    # failure hide behind "Boardroom tally unavailable".
+    if "Boardroom error:" in boardroom:
+        sanity_warnings.append("🏛️ Boardroom API call FAILED — no panel verdict or tally today; headline is the raw composite signal only.")
+    if "Trade ideas error:" in trade_ideas:
+        sanity_warnings.append("🎯 Trade Ideas API call FAILED — section shows the error message, not ideas.")
 
     print("\n[Layer 8] Pulling IBKR portfolio...")
     layer8_data = get_layer8()
