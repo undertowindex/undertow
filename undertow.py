@@ -436,6 +436,28 @@ def run_sanity_checks(l1, l2, l3, l3b, l3c, l3d, l3e):
     for label, layer in [("Layer 1", l1), ("Layer 2", l2), ("Layer 3", l3), ("Layer 3b", l3b), ("Layer 3c", l3c), ("Layer 3d", l3d), ("Layer 3e", l3e)]:
         if not (0 <= layer["score"] <= layer["max"]):
             warnings.append(f"{label} sanity: score {layer['score']} outside valid range 0-{layer['max']}")
+        # A layer that produced zero data almost always means its fetch hit
+        # an exception and fell back to score 0 (looks calm) with the real
+        # cause buried in its flags list. Score 0 from a genuinely calm
+        # reading and score 0 from "the feed never returned anything" are
+        # indistinguishable in the composite total unless called out here -
+        # this is the exact silent-failure mode the whole self-test exists
+        # to catch.
+        if not layer["data"] and layer["max"] > 0:
+            flag_summary = "; ".join(layer["flags"]) if layer["flags"] else "no flags recorded"
+            warnings.append(f"{label} produced NO DATA (scored 0/{layer['max']}, looks calm but may be a dead feed) - {flag_summary}")
+        # A PARTIAL failure (e.g. one of several FRED calls in a layer
+        # succeeds, a later one throws) leaves some real data in place, so
+        # the "no data" check above won't catch it. Every degraded-data
+        # flag in this file (exception handlers, "no data returned", GEX's
+        # insufficient/lopsided-chain guards) uses one of these words -
+        # confirmed by grepping every flags.append() call in this file, not
+        # guessed. Surface those as loud warnings too, not just quiet
+        # entries in a flags list a human has to go read.
+        _DEGRADED_FLAG_WORDS = ("error", "no data", "insufficient", "lopsided", "unavailable", "failed", "disabled", "could not")
+        for flag in layer["flags"]:
+            if any(w in flag.lower() for w in _DEGRADED_FLAG_WORDS):
+                warnings.append(f"{label} DEGRADED DATA: {flag}")
 
     return warnings
 
