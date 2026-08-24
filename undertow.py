@@ -440,22 +440,112 @@ def run_sanity_checks(l1, l2, l3, l3b, l3c, l3d, l3e):
     return warnings
 
 # ──────────────────────────────────────────────
+# SHARED: SPY OPTIONS CHAIN FETCH (feeds Layer 3c and Layer 3e)
+# ──────────────────────────────────────────────
+# Both the put/call ratio (3c) and dealer gamma (3e) are derived from the
+# same live SPY options chain (Yahoo Finance, free, no key), so they share
+# one fetch instead of hitting Yahoo twice for the same data.
+def _fetch_spy_option_chain():
+    tk = yf.Ticker("SPY")
+    hist = tk.history(period="5d")
+    spot = float(hist["Close"].dropna().iloc[-1])
+    last_bar_date = hist["Close"].dropna().index[-1].strftime("%Y-%m-%d")
+
+    today = datetime.date.today()
+    # SPY has daily expirations, so "first N in the window" would only
+    # ever sample the front week. Instead pick the expiration closest
+    # to each of ~1wk / 2wk / 1mo / 2mo out, so the measure spans the
+    # window and includes the heavyweight monthly expirations.
+    window = []
+    for exp in tk.options:
+        dte = (datetime.datetime.strptime(exp, "%Y-%m-%d").date() - today).days
+        if 5 <= dte <= 60:
+            window.append((exp, dte))
+
+    def _is_third_friday(exp_str):
+        d = datetime.datetime.strptime(exp_str, "%Y-%m-%d").date()
+        return d.weekday() == 4 and 15 <= d.day <= 21
+
+    # Force-include monthly OPEX expirations (third Fridays) - that is
+    # where the heavyweight dealer books sit - then add a front-week
+    # and a couple of spread-out picks around them.
+    expirations = [x for x in window if _is_third_friday(x[0])]
+    for target in (7, 14, 45):
+        if not window:
+            break
+        pick = min(window, key=lambda x: abs(x[1] - target))
+        if pick not in expirations:
+            expirations.append(pick)
+    expirations.sort(key=lambda x: x[1])
+    expirations = expirations[:6]
+
+    contracts = []
+    for exp, dte in expirations:
+        chain = tk.option_chain(exp)
+        for df, sign in ((chain.calls, 1), (chain.puts, -1)):
+            for strike, iv, oi, vol in zip(df["strike"], df["impliedVolatility"], df["openInterest"], df["volume"]):
+                try:
+                    strike, iv = float(strike), float(iv)
+                    oi = float(oi) if oi == oi else 0.0  # NaN-safe
+                    vol = float(vol) if vol == vol else 0.0
+                except (TypeError, ValueError):
+                    continue
+                contracts.append({"sign": sign, "strike": strike, "iv": iv, "oi": oi, "volume": vol, "dte": dte})
+
+    return {"spot": spot, "last_bar_date": last_bar_date, "expirations": expirations, "contracts": contracts}
+
+
+# ──────────────────────────────────────────────
 # LAYER 3c: OPTIONS SENTIMENT (PUT/CALL RATIO)
 # ──────────────────────────────────────────────
-# DISABLED as of 2026-07-30: CBOE's public CDN archive for this data is a
-# frozen historical dump, not a live feed - verified it stops at 2012
-# (and an alternate CBOE archive URL stops at 2019). It was silently
-# scoring "today's" sentiment off that frozen data every day since this
-# layer was added. No free live replacement was found. Contributes 0 and
-# max 0 until a real live source is wired in - see the loud flag below
-# instead of a silent absence.
-def get_layer3c():
-    return {
-        "score": 0,
-        "max": 0,
-        "flags": ["Layer 3c DISABLED - CBOE's free put/call archive is stale (frozen since ~2012), not live data. Needs a paid/live options-data source before this can be trusted again."],
-        "data": {},
-    }
+# Was DISABLED 2026-07-30 to 2026-08-24: CBOE's public CDN archive for this
+# data is a frozen historical dump, not a live feed - verified it stops at
+# 2012 (and an alternate CBOE archive URL stops at 2019). Re-enabled by
+# deriving the ratio from the same live SPY options chain already fetched
+# for Layer 3e, instead of a paid CBOE feed. This is a SPY-specific proxy
+# for options sentiment, not CBOE's broad total-market put/call ratio, so
+# its day-to-day numbers won't match the old CBOE series 1:1 - but it is
+# genuinely live. Thresholds are carried over from the original CBOE-based
+# version of this layer as a starting point; worth revisiting once this
+# proxy has a few weeks of its own history to calibrate against.
+def get_layer3c(chain=None):
+    score = 0
+    flags = []
+    data = {}
+
+    try:
+        if chain is None:
+            chain = _fetch_spy_option_chain()
+
+        put_volume = sum(c["volume"] for c in chain["contracts"] if c["sign"] == -1 and c["volume"] > 0)
+        call_volume = sum(c["volume"] for c in chain["contracts"] if c["sign"] == 1 and c["volume"] > 0)
+        put_oi = sum(c["oi"] for c in chain["contracts"] if c["sign"] == -1 and c["oi"] > 0)
+        call_oi = sum(c["oi"] for c in chain["contracts"] if c["sign"] == 1 and c["oi"] > 0)
+
+        if call_volume <= 0:
+            flags.append("Layer 3c put/call ratio: no usable call volume in today's SPY chain - scoring 0")
+            return {"score": 0, "max": 2, "flags": flags, "data": data}
+
+        pc_ratio = put_volume / call_volume
+        data["put_call_ratio"] = round(pc_ratio, 3)
+        data["put_call_source"] = "SPY options chain volume (Yahoo Finance, live) - proxy for the old CBOE index put/call ratio"
+        data["put_call_date"] = chain["last_bar_date"]
+        if call_oi > 0:
+            data["put_call_oi_ratio"] = round(put_oi / call_oi, 3)
+
+        if pc_ratio > 1.2:
+            score += 2
+            flags.append(f"Put/call ratio elevated at {pc_ratio:.2f} - heavy put buying, fear positioning")
+        elif pc_ratio > 1.0:
+            score += 1
+            flags.append(f"Put/call ratio above parity at {pc_ratio:.2f} - moderate hedging demand")
+        elif pc_ratio < 0.5:
+            score += 1
+            flags.append(f"Put/call ratio very low at {pc_ratio:.2f} - complacency risk")
+    except Exception as e:
+        flags.append(f"Layer 3c put/call ratio error: {e}")
+
+    return {"score": score, "max": 2, "flags": flags, "data": data}
 
 
 # ──────────────────────────────────────────────
@@ -502,66 +592,33 @@ def _bs_gamma(spot, strike, iv, t_years, r=0.04):
     return pdf / (spot * iv * math.sqrt(t_years))
 
 
-def get_layer3e():
+def get_layer3e(chain=None):
     score = 0
     flags = []
     data = {}
 
     try:
-        tk = yf.Ticker("SPY")
-        hist = tk.history(period="5d")
-        spot = float(hist["Close"].dropna().iloc[-1])
+        if chain is None:
+            chain = _fetch_spy_option_chain()
+        spot = chain["spot"]
         data["spy_spot"] = round(spot, 2)
-        data["last_bar_date"] = hist["Close"].dropna().index[-1].strftime("%Y-%m-%d")
-
-        today = datetime.date.today()
-        # SPY has daily expirations, so "first N in the window" would only
-        # ever sample the front week. Instead pick the expiration closest
-        # to each of ~1wk / 2wk / 1mo / 2mo out, so the measure spans the
-        # window and includes the heavyweight monthly expirations.
-        window = []
-        for exp in tk.options:
-            dte = (datetime.datetime.strptime(exp, "%Y-%m-%d").date() - today).days
-            if 5 <= dte <= 60:
-                window.append((exp, dte))
-        # Force-include monthly OPEX expirations (third Fridays) - that is
-        # where the heavyweight dealer books sit - then add a front-week
-        # and a couple of spread-out picks around them.
-        def _is_third_friday(exp_str):
-            d = datetime.datetime.strptime(exp_str, "%Y-%m-%d").date()
-            return d.weekday() == 4 and 15 <= d.day <= 21
-
-        expirations = [x for x in window if _is_third_friday(x[0])]
-        for target in (7, 14, 45):
-            if not window:
-                break
-            pick = min(window, key=lambda x: abs(x[1] - target))
-            if pick not in expirations:
-                expirations.append(pick)
-        expirations.sort(key=lambda x: x[1])
-        expirations = expirations[:6]
+        data["last_bar_date"] = chain["last_bar_date"]
 
         net_gex = 0.0   # $ change in dealer delta-hedge demand per 1% SPY move
         gross_gex = 0.0
         contracts_used = 0
         side_counts = {1: 0, -1: 0}  # calls / puts actually contributing
-        for exp, dte in expirations:
-            chain = tk.option_chain(exp)
-            t_years = dte / 365.0
-            for df, sign in ((chain.calls, 1), (chain.puts, -1)):
-                for strike, iv, oi in zip(df["strike"], df["impliedVolatility"], df["openInterest"]):
-                    try:
-                        strike, iv, oi = float(strike), float(iv), float(oi)
-                    except (TypeError, ValueError):
-                        continue
-                    if not (oi > 0 and 0.01 < iv < 5):
-                        continue
-                    gamma = _bs_gamma(spot, strike, iv, t_years)
-                    dollar_gamma = gamma * oi * 100 * spot * spot * 0.01
-                    net_gex += sign * dollar_gamma
-                    gross_gex += abs(dollar_gamma)
-                    contracts_used += 1
-                    side_counts[sign] += 1
+        for c in chain["contracts"]:
+            oi, iv = c["oi"], c["iv"]
+            if not (oi > 0 and 0.01 < iv < 5):
+                continue
+            t_years = c["dte"] / 365.0
+            gamma = _bs_gamma(spot, c["strike"], iv, t_years)
+            dollar_gamma = gamma * oi * 100 * spot * spot * 0.01
+            net_gex += c["sign"] * dollar_gamma
+            gross_gex += abs(dollar_gamma)
+            contracts_used += 1
+            side_counts[c["sign"]] += 1
 
         if contracts_used < 100 or gross_gex <= 0:
             flags.append(f"Layer 3e GEX: insufficient usable options data ({contracts_used} contracts) - scoring 0 today")
@@ -573,7 +630,7 @@ def get_layer3e():
         data["gex_contracts_used"] = contracts_used
         data["gex_calls_used"] = side_counts[1]
         data["gex_puts_used"] = side_counts[-1]
-        data["gex_expirations"] = [e for e, _ in expirations]
+        data["gex_expirations"] = [e for e, _ in chain["expirations"]]
 
         # Data-quality guard: if one whole side of the market has gone
         # dark (bad Yahoo IV/OI fields), the net number is not a real
@@ -595,17 +652,17 @@ def get_layer3e():
     return {"score": score, "max": 2, "flags": flags, "data": data}
 
 def compute_score(l1, l2, l3, l3b, l3c, l3d, l3e):
-    # l3c is disabled (see get_layer3c) and always contributes 0/0. With
-    # Layer 3e (dealer gamma, max 2) added Aug 2026, the live max is 23.
-    # Thresholds at 7/14 out of 23 - same proportions as the previous
-    # 6/13 out of 21.
+    # l3c was re-enabled 2026-08-24 (see get_layer3c) - now derived live from
+    # the SPY options chain instead of the dead CBOE archive, max 2 again.
+    # The live max is 25. Thresholds at 8/15 out of 25 - same +1/+1 pattern
+    # used for each prior 2-point layer addition (previously 7/14 out of 23).
     total = l1["score"] + l2["score"] + l3["score"] + l3b["score"] + l3c["score"] + l3d["score"] + l3e["score"]
 
-    if total <= 7:
+    if total <= 8:
         signal = "GREEN"
         emoji = "🟢"
         summary = "Markets calm. No significant stress signals detected."
-    elif total <= 14:
+    elif total <= 15:
         signal = "AMBER"
         emoji = "🟡"
         summary = "Elevated risk. Multiple stress signals present. Watch closely."
@@ -614,7 +671,7 @@ def compute_score(l1, l2, l3, l3b, l3c, l3d, l3e):
         emoji = "🔴"
         summary = "High alert. Significant macro stress across multiple indicators."
 
-    return {"score": total, "max": 23, "signal": signal, "emoji": emoji, "summary": summary}
+    return {"score": total, "max": 25, "signal": signal, "emoji": emoji, "summary": summary}
 
 # ─────────────────────────────────────────────
 # LAYER 5: THE BOARDROOM
@@ -1176,8 +1233,15 @@ def main():
     l3b = get_layer3b()
     print(f"  Score: {l3b['score']}/{l3b['max']} | Flags: {len(l3b['flags'])}", flush=True)
 
+    print("[Layers 3c/3e] Fetching SPY options chain (shared by both layers)...", flush=True)
+    try:
+        spy_chain = _fetch_spy_option_chain()
+    except Exception as e:
+        spy_chain = None
+        print(f"  ⚠️  Shared options chain fetch failed: {e} (3c/3e will each retry individually)", flush=True)
+
     print("[Layer 3c] Options sentiment (put/call ratio)...", flush=True)
-    l3c = get_layer3c()
+    l3c = get_layer3c(spy_chain)
     print(f"  Score: {l3c['score']}/{l3c['max']} | Flags: {len(l3c['flags'])}", flush=True)
 
     print("[Layer 3d] SKEW index (tail-risk pricing)...", flush=True)
@@ -1185,7 +1249,7 @@ def main():
     print(f"  Score: {l3d['score']}/{l3d['max']} | Flags: {len(l3d['flags'])}", flush=True)
 
     print("[Layer 3e] Dealer gamma exposure (GEX)...", flush=True)
-    l3e = get_layer3e()
+    l3e = get_layer3e(spy_chain)
     print(f"  Score: {l3e['score']}/{l3e['max']} | Flags: {len(l3e['flags'])}", flush=True)
 
     print("[Self-Test] Running sanity checks...", flush=True)
