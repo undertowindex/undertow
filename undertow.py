@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import math
 import time
@@ -939,9 +940,13 @@ Be specific. No waffle."""
 # LAYER 7: EMAIL via RESEND
 # ─────────────────────────────────────────────
 def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", glint_html="", sanity_warnings=None, final_signal_data=None, glint_review="", extra_flags=None):
+    """Returns True only on a confirmed 200 from Resend. This is an
+    early-warning system - a report that silently failed to send on the
+    one day it mattered is worse than no report at all, so callers must
+    check this and fail loudly (non-zero exit), not just log and move on."""
     if not RESEND_API_KEY:
         print("No Resend key — skipping email.")
-        return
+        return False
 
     date_str = datetime.datetime.now().strftime("%A %d %B %Y, %H:%M UTC")
     score = score_data["score"]
@@ -1038,10 +1043,13 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", g
         )
         if response.status_code == 200:
             print(f"✅ Email sent to {', '.join(ALERT_EMAILS)}")
+            return True
         else:
             print(f"❌ Email failed: {response.status_code} — {response.text}")
+            return False
     except Exception as e:
         print(f"❌ Email error: {e}")
+        return False
 
 # ─────────────────────────────────────────────
 # MAIN
@@ -1400,7 +1408,14 @@ def main():
     publish_ark_handoff(ark_inputs, ARK_HANDOFF_GIST_ID, GITHUB_GIST_TOKEN)
 
     print("\n[Layer 7] Sending email report...")
-    send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html, glint_html, sanity_warnings, final_signal_data, glint_review, extra_flags=l3b["flags"] + l3d["flags"] + l3e["flags"])
+    email_sent = send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html, glint_html, sanity_warnings, final_signal_data, glint_review, extra_flags=l3b["flags"] + l3d["flags"] + l3e["flags"])
+
+    if not email_sent:
+        print("\n" + "=" * 60)
+        print("🚨 UNDERTOW INDEX — RUN COMPLETED BUT EMAIL DID NOT SEND 🚨")
+        print("The analysis above is real, but you will NOT receive today's report.")
+        print("=" * 60)
+        sys.exit(1)
 
     print("\n" + "=" * 60)
     print("UNDERTOW INDEX — COMPLETE")
