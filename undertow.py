@@ -646,7 +646,7 @@ def get_layer3e(chain=None):
             contracts_used += 1
             side_counts[c["sign"]] += 1
 
-        if contracts_used < 100 or gross_gex <= 0:
+        if contracts_used < 50 or gross_gex <= 0:
             flags.append(f"Layer 3e GEX: insufficient usable options data ({contracts_used} contracts) - scoring 0 today")
             return {"score": 0, "max": 2, "flags": flags, "data": data}
 
