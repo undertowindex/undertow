@@ -37,9 +37,12 @@ def yf_download_with_retry(tickers, retries=3, backoff_seconds=3, **kwargs):
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 FRED_API_KEY = os.environ.get("FRED_API_KEY", "")
 RESEND_API_KEY = os.environ.get("SENDGRID_API_KEY", "")
-# Comma-separated. Gmail copy exists so Claude (connected to that
-# account) can review the daily emails directly during testing.
-ALERT_EMAIL = os.environ.get("ALERT_EMAIL", "micahbrown4@me.com,micah.brown7@gmail.com,jakobgoulding@gmail.com,olisbrown@gmail.com")
+# Comma-separated. Temporarily just the account owner - Resend's shared
+# "onboarding@resend.dev" testing address can only send to the account's
+# own verified email (confirmed 2026-08-26, was silently/loudly failing
+# every run since the other 3 addresses were added). Add the others back
+# once a real domain is verified at resend.com/domains.
+ALERT_EMAIL = os.environ.get("ALERT_EMAIL", "micahbrown4@me.com")
 ALERT_EMAILS = [e.strip() for e in ALERT_EMAIL.split(",") if e.strip()]
 # Ark handoff: lets Ark (running locally, not on Railway) pull today's real
 # signal automatically instead of Micah retyping it from the email. Micah
