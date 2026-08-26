@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.env
+latest_report.html
+latest_report.txt
+last_run.log
