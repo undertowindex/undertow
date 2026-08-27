@@ -4,8 +4,8 @@ import os
 import datetime
 import requests
 
-RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
-ALERT_EMAIL = os.environ.get("ALERT_EMAIL", "micahbrown4@me.com")
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "").strip()
+ALERT_EMAIL = os.environ.get("ALERT_EMAIL", "micahbrown4@me.com").strip()
 ALERT_EMAILS = [e.strip() for e in ALERT_EMAIL.split(",") if e.strip()]
 
 
