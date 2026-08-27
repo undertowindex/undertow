@@ -12,11 +12,11 @@ import argparse
 import logging
 import sys
 
-from glint.tickers import FTSE_100, US_LARGE_CAP
-from glint.fetch import fetch_fundamentals
-from glint.score import score_stocks
-from glint.report import format_report, format_html_report
-from glint.email_sender import send_report_email
+from .tickers import FTSE_100, US_LARGE_CAP
+from .fetch import fetch_fundamentals
+from .score import score_stocks
+from .report import format_report, format_html_report
+from .email_sender import send_report_email
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 

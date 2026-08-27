@@ -7,8 +7,7 @@ import datetime
 import requests
 import yfinance as yf
 
-from glint.runner import run_glint
-from glint.email_section import build_glint_section
+from glint_bridge import run_glint, build_glint_section
 from boardroom_research import (
     should_run_full_research, run_member_research, run_full_boardroom,
     run_glint_review, log_run,
