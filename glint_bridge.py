@@ -12,10 +12,17 @@ class GlintCandidate:
     def __init__(self, row):
         self.row = row
         self.is_candidate = row.get("call") == "BUY"
-        self.ticker = row.get("ticker")
+        self.value_score = row.get("score", 0)
 
     def __getitem__(self, key):
         return self.row[key]
+
+
+class GlintFlags:
+    """Flags object matching old API expectations."""
+    def __init__(self, ticker, price=None):
+        self.ticker = ticker
+        self.price = price
 
 
 def run_glint():
@@ -23,7 +30,7 @@ def run_glint():
     universe = FTSE_100 + US_LARGE_CAP
     fundamentals = fetch_fundamentals(universe)
     rows, excluded = score_stocks(fundamentals)
-    return [(GlintCandidate(row), {}) for row in rows]
+    return [(GlintCandidate(row), GlintFlags(row.get("ticker"))) for row in rows]
 
 
 def build_glint_section(glint_results):
