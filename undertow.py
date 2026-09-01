@@ -337,18 +337,34 @@ def get_layer3b():
         cot_data = cot_resp.json()
 
         if cot_data:
-            long_pos = float(cot_data[0].get("lev_money_positions_long", 0))
-            short_pos = float(cot_data[0].get("lev_money_positions_short", 0))
-            net_pos = long_pos - short_pos
-            data["cot_long"] = long_pos
-            data["cot_short"] = short_pos
-            data["cot_net"] = net_pos
-            data["cot_report_date"] = cot_data[0].get("report_date_as_yyyy_mm_dd", "")[:10]
-            if net_pos < 0:
-                score += 1
-                flags.append(f"COT: leveraged funds net SHORT E-mini S&P ({net_pos:,.0f} contracts)")
+            report_date_str = cot_data[0].get("report_date_as_yyyy_mm_dd", "")[:10]
+            # FRESHNESS GATE: Only use COT data if it's current week (≤7 days old)
+            # COT reports weekly on Friday for positions as of Tuesday. Stale data = useless.
+            try:
+                report_date = datetime.datetime.strptime(report_date_str, "%Y-%m-%d")
+                days_old = (datetime.datetime.now() - report_date).days
+                if days_old > 7:
+                    # REJECT stale data — do not use it in scoring
+                    flags.append(f"⚠️  COT: STALE DATA ({days_old} days old) — rejecting, awaiting fresh weekly report")
+                    data["cot_report_date"] = report_date_str
+                    data["cot_stale"] = True
+                else:
+                    # Data is fresh — use it
+                    long_pos = float(cot_data[0].get("lev_money_positions_long", 0))
+                    short_pos = float(cot_data[0].get("lev_money_positions_short", 0))
+                    net_pos = long_pos - short_pos
+                    data["cot_long"] = long_pos
+                    data["cot_short"] = short_pos
+                    data["cot_net"] = net_pos
+                    data["cot_report_date"] = report_date_str
+                    data["cot_stale"] = False
+                    if net_pos < 0:
+                        score += 1
+                        flags.append(f"COT: leveraged funds net SHORT E-mini S&P ({net_pos:,.0f} contracts) [week of {report_date_str}]")
+            except Exception as e:
+                flags.append(f"COT: date error — {e}")
         else:
-            flags.append("COT: no data returned")
+            flags.append("COT: no data available")
     except Exception as e:
         flags.append(f"Layer 3b COT error: {e}")
 
@@ -456,7 +472,7 @@ def run_sanity_checks(l1, l2, l3, l3b, l3c, l3d, l3e):
     _check_freshness(warnings, "Layer 2 (yield curve)", l2["data"].get("yield_curve_date"), max_age_days=5)
     _check_freshness(warnings, "Layer 2 (HY spread)", l2["data"].get("hy_spread_date"), max_age_days=5)
     _check_freshness(warnings, "Layer 3", l3["data"].get("last_bar_date"), max_age_days=5)
-    _check_freshness(warnings, "Layer 3b (COT)", l3b["data"].get("cot_report_date"), max_age_days=10)
+    _check_freshness(warnings, "Layer 3b (COT)", l3b["data"].get("cot_report_date"), max_age_days=7)
     _check_freshness(warnings, "Layer 3b (SOFR-DFF)", l3b["data"].get("sofr_dff_date"), max_age_days=5)
     _check_freshness(warnings, "Layer 3b (reverse repo)", l3b["data"].get("reverse_repo_date"), max_age_days=5)
     _check_freshness(warnings, "Layer 3b (TED-equiv)", l3b["data"].get("ted_spread_date"), max_age_days=5)
