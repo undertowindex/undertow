@@ -232,10 +232,23 @@ def get_layer2():
             score += 1
             flags.append(f"HY spreads elevated at {hy:.2f}%")
 
+        # Cross-asset divergence: Bonds selling into low VIX = hidden stress
+        try:
+            vix_data = yf_download_with_retry("^VIX", period="1d", interval="1d")
+            if not vix_data.empty:
+                vix = float(vix_data["Close"].iloc[-1])
+                data["vix_level"] = round(vix, 2)
+                # Flag when bonds are selling (10Y > 4.5%) but equity vol is complacent (VIX < 15)
+                if t10 is not None and t10 > 4.5 and vix < 15:
+                    score += 2
+                    flags.append(f"⚡ DIVERGENCE: Bonds selling ({t10:.2f}%) into low VIX ({vix:.1f}) — hidden stress")
+        except Exception as e:
+            pass  # VIX divergence check is optional, don't fail Layer 2 on it
+
     except Exception as e:
         flags.append(f"Layer 2 error: {e}")
 
-    return {"score": score, "max": 4, "flags": flags, "data": data}
+    return {"score": score, "max": 6, "flags": flags, "data": data}
 
 # ─────────────────────────────────────────────
 # LAYER 3: MACRO TREMORS
