@@ -1,0 +1,35 @@
+================================================================
+ARK — advisory report (local, manual-execution only)
+Undertow signal generated: 2026-08-29T07:09:31.090544Z
+================================================================
+
+Composite score: 9/25  |  Signal: AMBER
+Previous recorded score: 6
+
+🟠 ACT — signal has just crossed from GREEN to AMBER. This is the early-tremor buy window: implied volatility is likely still cheap. Draft advisory ideas below — nothing has been placed, review and execute manually in IBKR if you agree.
+
+--- Draft trade ideas (not executed) ---
+
+Shorts / insurance:
+  • SPY long-dated put (12-18mo)
+      Broad-market hedge, bought for speed of execution while IV is still cheap — this is the core insurance leg.
+  • QQQ long-dated put (12-18mo)
+      Tech-weighted hedge alongside SPY, since concentration risk usually shows up there first.
+  • IWM long-dated put (12-18mo)
+      Small-cap hedge. Small caps are higher-beta and tend to fall hardest in a broad selloff, so an IWM put adds downside breadth beyond the large-cap SPY/QQQ names.
+  • HYG put or credit hedge (12-18mo)
+      Credit hedge. High-yield bonds (HYG) crack early when stress builds — a put here captures the credit leg of a downturn that pure equity puts miss. Ties directly to Undertow's own credit-spread layer flashing.
+  • VIX call spread (12-18mo)
+      Convexity play — VIX calls are cheapest exactly when nobody wants them, which is now. Structured as a call SPREAD (buy lower strike, sell higher) to cap the premium paid, since outright VIX calls bleed hard if the spike doesn't come.
+
+  Note: By design, Ark's short/insurance side is INDEX-ONLY — broad hedges (equity indices, small caps, credit) plus VIX convexity. Individual single-stock shorts are deliberately excluded: unbounded loss, borrow cost, and squeeze risk make them a different risk class, and a weak name can stay overvalued for years. Speed and defined risk over size.
+
+Longs (quality survivors from Glint):
+  No candidate cleared the quality-survivor bar (value_score == 3) in today's Glint run — nothing to add to the long book yet.
+
+⚠️  These are sketches, not orders. Verify actual strikes, expirations, and liquidity in IBKR before placing anything — same caveat as Undertow's own trade ideas.
+
+--- Open advisory positions Ark is tracking ---
+  1. Opened 2026-08-29  (0 days ago)  status: open
+
+================================================================

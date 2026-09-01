@@ -1,0 +1,14 @@
+================================================================
+ARK — advisory report (local, manual-execution only)
+Undertow signal generated: 2026-08-30T07:10:02.378528Z
+================================================================
+
+Composite score: 9/25  |  Signal: AMBER
+Previous recorded score: 9
+
+🟢 CALM — no early-tremor signal today. No new advisory positions.
+
+--- Open advisory positions Ark is tracking ---
+  1. Opened 2026-08-29  (1 days ago)  status: open
+
+================================================================

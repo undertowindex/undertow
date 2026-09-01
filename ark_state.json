@@ -1,0 +1,54 @@
+{
+  "history": [
+    {
+      "date": "2026-08-28",
+      "score": 6,
+      "signal": "GREEN"
+    },
+    {
+      "date": "2026-08-29",
+      "score": 9,
+      "signal": "AMBER"
+    },
+    {
+      "date": "2026-08-30",
+      "score": 9,
+      "signal": "AMBER"
+    }
+  ],
+  "open_positions": [
+    {
+      "opened": "2026-08-29",
+      "age_days": 1,
+      "status": "open",
+      "ideas": {
+        "shorts": [
+          {
+            "instrument": "SPY long-dated put (12-18mo)",
+            "rationale": "Broad-market hedge, bought for speed of execution while IV is still cheap \u2014 this is the core insurance leg."
+          },
+          {
+            "instrument": "QQQ long-dated put (12-18mo)",
+            "rationale": "Tech-weighted hedge alongside SPY, since concentration risk usually shows up there first."
+          },
+          {
+            "instrument": "IWM long-dated put (12-18mo)",
+            "rationale": "Small-cap hedge. Small caps are higher-beta and tend to fall hardest in a broad selloff, so an IWM put adds downside breadth beyond the large-cap SPY/QQQ names."
+          },
+          {
+            "instrument": "HYG put or credit hedge (12-18mo)",
+            "rationale": "Credit hedge. High-yield bonds (HYG) crack early when stress builds \u2014 a put here captures the credit leg of a downturn that pure equity puts miss. Ties directly to Undertow's own credit-spread layer flashing."
+          },
+          {
+            "instrument": "VIX call spread (12-18mo)",
+            "rationale": "Convexity play \u2014 VIX calls are cheapest exactly when nobody wants them, which is now. Structured as a call SPREAD (buy lower strike, sell higher) to cap the premium paid, since outright VIX calls bleed hard if the spike doesn't come."
+          }
+        ],
+        "shorts_note": "By design, Ark's short/insurance side is INDEX-ONLY \u2014 broad hedges (equity indices, small caps, credit) plus VIX convexity. Individual single-stock shorts are deliberately excluded: unbounded loss, borrow cost, and squeeze risk make them a different risk class, and a weak name can stay overvalued for years. Speed and defined risk over size.",
+        "longs": [],
+        "longs_note": "No candidate cleared the quality-survivor bar (value_score == 3) in today's Glint run \u2014 nothing to add to the long book yet.",
+        "context": "Undertow composite 9/25, signal AMBER."
+      }
+    }
+  ]
+}

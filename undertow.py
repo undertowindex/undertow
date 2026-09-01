@@ -190,9 +190,12 @@ def get_layer2():
     try:
         t10, t10_date = fred_get("DGS10")
         t2, t2_date = fred_get("DGS2")
+        t30, t30_date = fred_get("DGS30")
         spread = t10 - t2
         data["yield_curve_spread"] = round(spread, 3)
         data["yield_curve_date"] = min(t10_date, t2_date)
+        data["t10_yield"] = round(t10, 3) if t10 else None
+        data["t30_yield"] = round(t30, 3) if t30 else None
 
         if spread < 0:
             score += 2
@@ -200,6 +203,23 @@ def get_layer2():
         elif spread < 0.3:
             score += 1
             flags.append(f"Yield curve flat: 10Y-2Y = {spread:.3f}%")
+
+        # Monitor absolute yield levels - elevated yields signal bond selling/rate risk
+        if t10 is not None:
+            if t10 > 5.0:
+                score += 2
+                flags.append(f"10Y Treasury yield elevated at {t10:.2f}% — bond selling pressure")
+            elif t10 > 4.5:
+                score += 1
+                flags.append(f"10Y Treasury yield rising ({t10:.2f}%)")
+
+        if t30 is not None:
+            if t30 > 5.2:
+                score += 2
+                flags.append(f"30Y Treasury yield critically high at {t30:.2f}% — long-end stress")
+            elif t30 > 4.8:
+                score += 1
+                flags.append(f"30Y Treasury yield elevated ({t30:.2f}%)")
 
         hy, hy_date = fred_get("BAMLH0A0HYM2")
         data["hy_spread"] = round(hy, 3)
@@ -385,6 +405,12 @@ def run_sanity_checks(l1, l2, l3, l3b, l3c, l3d, l3e):
     yc = l2["data"].get("yield_curve_spread")
     if yc is not None and not (-5 <= yc <= 5):
         warnings.append(f"Layer 2 sanity: yield curve spread {yc} outside plausible range (-5pp to 5pp)")
+    t10 = l2["data"].get("t10_yield")
+    if t10 is not None and not (0 <= t10 <= 10):
+        warnings.append(f"Layer 2 sanity: 10Y yield {t10} outside plausible range (0-10%)")
+    t30 = l2["data"].get("t30_yield")
+    if t30 is not None and not (0 <= t30 <= 10):
+        warnings.append(f"Layer 2 sanity: 30Y yield {t30} outside plausible range (0-10%)")
     hy = l2["data"].get("hy_spread")
     if hy is not None and not (0 <= hy <= 20):
         warnings.append(f"Layer 2 sanity: HY spread {hy} outside plausible range (0-20%)")
