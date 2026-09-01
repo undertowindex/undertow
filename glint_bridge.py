@@ -12,10 +12,14 @@ class GlintCandidate:
     def __init__(self, row):
         self.row = row
         self.is_candidate = row.get("call") == "BUY"
+        self.ticker = row.get("ticker")
         self.value_score = row.get("score", 0)
 
     def __getitem__(self, key):
         return self.row[key]
+
+    def get(self, key, default=None):
+        return self.row.get(key, default)
 
 
 class GlintFlags:
