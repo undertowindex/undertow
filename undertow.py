@@ -304,6 +304,49 @@ def get_layer3():
             score += 1
             flags.append(f"Dollar above its 50-day average ({dollar_pct_above_ma:.1f}%)")
 
+        # Institutional gold positioning (flight-to-safety indicator)
+        try:
+            cot_gold_url = "https://yw9f-hn96.json.ckan.io/api/3/action/datastore_search_sql?sql=SELECT%20*%20FROM%20%22yw9f-hn96%22%20WHERE%20%22commodity%22%3D%27Gold%27%20ORDER%20BY%20%22report_date_as_yyyy_mm_dd%22%20DESC%20LIMIT%202"
+            resp = requests.get(cot_gold_url, timeout=10)
+            cot_gold_data = resp.json().get("result", {}).get("records", [])
+
+            if cot_gold_data:
+                report_date_str = cot_gold_data[0].get("report_date_as_yyyy_mm_dd", "")[:10]
+                try:
+                    report_date = datetime.datetime.strptime(report_date_str, "%Y-%m-%d")
+                    days_old = (datetime.datetime.now() - report_date).days
+
+                    if days_old <= 8:
+                        # Data is fresh — use it
+                        long_pos = float(cot_gold_data[0].get("lev_money_positions_long", 0))
+                        short_pos = float(cot_gold_data[0].get("lev_money_positions_short", 0))
+                        net_pos = long_pos - short_pos
+                        data["gold_cot_long"] = long_pos
+                        data["gold_cot_short"] = short_pos
+                        data["gold_cot_net"] = net_pos
+                        data["gold_cot_report_date"] = report_date_str
+
+                        # Compare to prior week if available
+                        prior_net = 0
+                        if len(cot_gold_data) > 1:
+                            prior_long = float(cot_gold_data[1].get("lev_money_positions_long", 0))
+                            prior_short = float(cot_gold_data[1].get("lev_money_positions_short", 0))
+                            prior_net = prior_long - prior_short
+
+                        net_change = net_pos - prior_net
+
+                        # Heavy institutional gold accumulation = flight-to-safety signal
+                        if net_pos > 200000:  # Threshold for "heavy" positioning
+                            score += 2
+                            flags.append(f"🏆 Heavy institutional gold longs ({net_pos:,.0f}) — flight-to-safety accumulation [week of {report_date_str}]")
+                        elif net_change > 50000:  # Large weekly increase
+                            score += 1
+                            flags.append(f"Institutions adding gold longs (+{net_change:,.0f} this week) — caution building [week of {report_date_str}]")
+                except (ValueError, TypeError):
+                    pass  # Date parsing failed, skip gold positioning
+        except Exception as e:
+            pass  # Gold COT fetch is optional, don't fail Layer 3 on it
+
     except Exception as e:
         flags.append(f"Layer 3 error: {e}")
 
