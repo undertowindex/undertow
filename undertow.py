@@ -364,50 +364,53 @@ def get_layer3b():
     data = {}
 
     try:
+        # DISABLED 2026-09-18: CFTC endpoint blocked by Railway network policy.
+        # Will re-enable once network access is restored.
         # yw9f-hn96 is CFTC's "Traders in Financial Futures" report, which
         # actually has lev_money_positions_long/short. The old resource id
         # (jun7-fc8e) was the Legacy report - it lacks those fields
         # entirely, so .get(..., 0) silently defaulted to 0 every day. The
         # filter is now an exact match so it can't also match "MICRO
         # E-MINI S&P 500", a different, much smaller retail contract.
-        cot_url = "https://publicreporting.cftc.gov/resource/yw9f-hn96.json"
-        cot_params = {
-            "$where": "contract_market_name = 'E-MINI S&P 500'",
-            "$order": "report_date_as_yyyy_mm_dd DESC",
-            "$limit": 1
-        }
-        cot_resp = requests.get(cot_url, params=cot_params, timeout=10)
-        cot_data = cot_resp.json()
-
-        if cot_data:
-            report_date_str = cot_data[0].get("report_date_as_yyyy_mm_dd", "")[:10]
-            # FRESHNESS GATE: Only use COT data if it's current week (≤8 days old)
-            # COT publishes every Friday 15:30 EST for positions as of Tuesday. Allow up to 8 days for Friday→next Friday.
-            try:
-                report_date = datetime.datetime.strptime(report_date_str, "%Y-%m-%d")
-                days_old = (datetime.datetime.now() - report_date).days
-                if days_old > 8:
-                    # REJECT stale data — do not use it in scoring
-                    flags.append(f"⚠️  COT: STALE DATA ({days_old} days old) — rejecting, awaiting fresh weekly report")
-                    data["cot_report_date"] = report_date_str
-                    data["cot_stale"] = True
-                else:
-                    # Data is fresh — use it
-                    long_pos = float(cot_data[0].get("lev_money_positions_long", 0))
-                    short_pos = float(cot_data[0].get("lev_money_positions_short", 0))
-                    net_pos = long_pos - short_pos
-                    data["cot_long"] = long_pos
-                    data["cot_short"] = short_pos
-                    data["cot_net"] = net_pos
-                    data["cot_report_date"] = report_date_str
-                    data["cot_stale"] = False
-                    if net_pos < 0:
-                        score += 1
-                        flags.append(f"COT: leveraged funds net SHORT E-mini S&P ({net_pos:,.0f} contracts) [week of {report_date_str}]")
-            except Exception as e:
-                flags.append(f"COT: date error — {e}")
-        else:
-            flags.append("COT: no data available")
+        # cot_url = "https://publicreporting.cftc.gov/resource/yw9f-hn96.json"
+        # cot_params = {
+        #     "$where": "contract_market_name = 'E-MINI S&P 500'",
+        #     "$order": "report_date_as_yyyy_mm_dd DESC",
+        #     "$limit": 1
+        # }
+        # cot_resp = requests.get(cot_url, params=cot_params, timeout=10)
+        # cot_data = cot_resp.json()
+        #
+        # if cot_data:
+        #     report_date_str = cot_data[0].get("report_date_as_yyyy_mm_dd", "")[:10]
+        #     # FRESHNESS GATE: Only use COT data if it's current week (≤8 days old)
+        #     # COT publishes every Friday 15:30 EST for positions as of Tuesday. Allow up to 8 days for Friday→next Friday.
+        #     try:
+        #         report_date = datetime.datetime.strptime(report_date_str, "%Y-%m-%d")
+        #         days_old = (datetime.datetime.now() - report_date).days
+        #         if days_old > 8:
+        #             # REJECT stale data — do not use it in scoring
+        #             flags.append(f"⚠️  COT: STALE DATA ({days_old} days old) — rejecting, awaiting fresh weekly report")
+        #             data["cot_report_date"] = report_date_str
+        #             data["cot_stale"] = True
+        #         else:
+        #             # Data is fresh — use it
+        #             long_pos = float(cot_data[0].get("lev_money_positions_long", 0))
+        #             short_pos = float(cot_data[0].get("lev_money_positions_short", 0))
+        #             net_pos = long_pos - short_pos
+        #             data["cot_long"] = long_pos
+        #             data["cot_short"] = short_pos
+        #             data["cot_net"] = net_pos
+        #             data["cot_report_date"] = report_date_str
+        #             data["cot_stale"] = False
+        #             if net_pos < 0:
+        #                 score += 1
+        #                 flags.append(f"COT: leveraged funds net SHORT E-mini S&P ({net_pos:,.0f} contracts) [week of {report_date_str}]")
+        #     except Exception as e:
+        #         flags.append(f"COT: date error — {e}")
+        # else:
+        #     flags.append("COT: no data available")
+        flags.append("⚠️  COT: DISABLED — network policy blocking publicreporting.cftc.gov (will re-enable once Railway network access restored)")
     except Exception as e:
         flags.append(f"Layer 3b COT error: {e}")
 
