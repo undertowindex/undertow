@@ -1437,33 +1437,12 @@ def main():
                 **l3b.get("data", {}), **l3d.get("data", {}), **l3e.get("data", {})}
     data_text = json.dumps(raw_data, indent=2)
 
-    run_full, mode_reason = should_run_full_research(score_data["signal"])
-    boardroom_mode = "full" if run_full else "cheap"
-    print(f"\n[Layer 5] Boardroom mode: {boardroom_mode} ({mode_reason})", flush=True)
+    print(f"\n[Layer 5] Boardroom — pure data-driven council (no web research)", flush=True)
 
     research = None
     glint_review = ""
-    if run_full and ANTHROPIC_API_KEY:
-        try:
-            print("  Researching living members (live web search)...", flush=True)
-            research = run_member_research(ANTHROPIC_API_KEY, score_data["signal"], data_text, flags_text)
-            found = sum(1 for r in research if r["found"])
-            print(f"  Recent public commentary found for {found}/{len(research)} living members.", flush=True)
-            boardroom = run_full_boardroom(ANTHROPIC_API_KEY, score_data, data_text, flags_text, research)
-            boardroom = f"[Full grounded run — {mode_reason}; recent commentary found for {found}/{len(research)} living members]\n\n" + boardroom
-            try:
-                glint_review = run_glint_review(ANTHROPIC_API_KEY, research, glint_results, score_data)
-            except Exception as e:
-                print(f"  ⚠️  Glint review failed: {e}", flush=True)
-                glint_review = "Boardroom review of Glint candidates unavailable today (call failed)."
-        except Exception as e:
-            print(f"  ⚠️  Full boardroom failed ({e}) — falling back to cheap board.", flush=True)
-            research = None
-            boardroom = run_boardroom(score_data, l1, l2, l3)
-            boardroom = "[Desk view — full grounded run FAILED today, this is the unresearched fallback]\n\n" + boardroom
-    else:
-        boardroom = run_boardroom(score_data, l1, l2, l3)
-        boardroom = f"[Desk view — {mode_reason}; member takes are NOT grounded in fresh research today]\n\n" + boardroom
+    boardroom = run_boardroom(score_data, l1, l2, l3)
+    boardroom = "[Council thinks fresh about today's market data — zero old quotes]\n\n" + boardroom
     print(boardroom)
 
     tally = parse_boardroom_tally(boardroom)
