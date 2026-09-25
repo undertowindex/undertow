@@ -939,7 +939,7 @@ Format clearly with each member's name bolded."""
     try:
         return call_anthropic_text(
             {
-                "model": "claude-3-5-haiku-20241022",
+                "model": "claude-haiku-4-5-20251001",
                 "max_tokens": 6500,
                 "tools": [{"type": "web_search_20250305", "name": "web_search"}],
                 "messages": [{"role": "user", "content": prompt}]
@@ -1055,7 +1055,7 @@ Be specific. No waffle."""
     try:
         return call_anthropic_text(
             {
-                "model": "claude-3-5-haiku-20241022",
+                "model": "claude-haiku-4-5-20251001",
                 "max_tokens": 2500,
                 "messages": [{"role": "user", "content": prompt}]
             },
