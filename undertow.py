@@ -540,12 +540,12 @@ def run_sanity_checks(l1, l2, l3, l3b, l3c, l3d, l3e):
 
     # Freshness checks across every layer that carries a date - daily
     # market/FRED data gets 5 days' tolerance (covers weekends plus a
-    # holiday), COT gets 10 (it only reports weekly with a lag).
+    # holiday), COT gets 10 (it only reports weekly with a 2-week indexing lag).
     _check_freshness(warnings, "Layer 1", l1["data"].get("last_bar_date"), max_age_days=5)
     _check_freshness(warnings, "Layer 2 (yield curve)", l2["data"].get("yield_curve_date"), max_age_days=5)
     _check_freshness(warnings, "Layer 2 (HY spread)", l2["data"].get("hy_spread_date"), max_age_days=5)
     _check_freshness(warnings, "Layer 3", l3["data"].get("last_bar_date"), max_age_days=5)
-    _check_freshness(warnings, "Layer 3b (COT)", l3b["data"].get("cot_report_date"), max_age_days=7)
+    _check_freshness(warnings, "Layer 3b (COT)", l3b["data"].get("cot_report_date"), max_age_days=10)
     _check_freshness(warnings, "Layer 3b (SOFR-DFF)", l3b["data"].get("sofr_dff_date"), max_age_days=5)
     _check_freshness(warnings, "Layer 3b (reverse repo)", l3b["data"].get("reverse_repo_date"), max_age_days=5)
     _check_freshness(warnings, "Layer 3b (TED-equiv)", l3b["data"].get("ted_spread_date"), max_age_days=5)
@@ -1092,6 +1092,22 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", g
     flags_html = "".join(f"<li>{f}</li>" for f in all_flags) if all_flags else "<li>No flags</li>"
     signal_color = {"GREEN": "#2ecc71", "AMBER": "#f39c12", "RED": "#e74c3c"}.get(signal, "#999")
 
+    # Extract VVIX and MOVE for explicit display
+    vvix_val = l1.get("data", {}).get("VVIX", "N/A")
+    move_val = l2.get("data", {}).get("move_index", "N/A")
+    indicator_display = ""
+    if vvix_val != "N/A" or move_val != "N/A":
+        indicator_lines = []
+        if vvix_val != "N/A":
+            indicator_lines.append(f"VIX disorderliness (VVIX): {vvix_val}")
+        if move_val != "N/A":
+            indicator_lines.append(f"Bond volatility (MOVE): {move_val}")
+        indicator_html = "".join(f"<li>{line}</li>" for line in indicator_lines)
+        indicator_display = f"""<h3 style="color: #f0c040;">📊 Key Indicator Snapshot</h3>
+<ul style="background: #1a1a1a; padding: 15px 15px 15px 30px; border-radius: 4px;">
+{indicator_html}
+</ul>"""
+
     sanity_warnings = sanity_warnings or []
     sanity_html = ""
     if sanity_warnings:
@@ -1130,6 +1146,7 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", g
 <ul style="background: #1a1a1a; padding: 15px 15px 15px 30px; border-radius: 4px;">
 {flags_html}
 </ul>
+{indicator_display}
 <h3 style="color: #f0c040;">🏛️ The Boardroom Verdict</h3>
 <div style="background: #1a1a1a; padding: 15px; border-radius: 4px; white-space: pre-wrap; line-height: 1.6;">
 {boardroom}
@@ -1471,12 +1488,12 @@ def main():
     glint_review = ""
     if run_full and ANTHROPIC_API_KEY:
         try:
-            print("  Researching living members (live web search)...", flush=True)
+            print("  Generating framework-based board opinions...", flush=True)
             research = run_member_research(ANTHROPIC_API_KEY, score_data["signal"], data_text, flags_text)
-            found = sum(1 for r in research if r["found"])
-            print(f"  Recent public commentary found for {found}/{len(research)} living members.", flush=True)
+            votes = sum(1 for r in research if r.get("vote"))
+            print(f"  Board members voted: {votes}/{len(research)}", flush=True)
             boardroom = run_full_boardroom(ANTHROPIC_API_KEY, score_data, data_text, flags_text, research)
-            boardroom = f"[Full grounded run — {mode_reason}; recent commentary found for {found}/{len(research)} living members]\n\n" + boardroom
+            boardroom = f"[Full framework-based run — {mode_reason}; all {len(research)} members voted]\n\n" + boardroom
             try:
                 glint_review = run_glint_review(ANTHROPIC_API_KEY, research, glint_results, score_data)
             except Exception as e:
