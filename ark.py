@@ -170,9 +170,11 @@ def save_state(state):
 def classify_window(today, history):
     """
     Decide which window we're in:
-      - "too_late"   : signal is already RED — premium has almost certainly
-                        already repriced; buying insurance now is expensive,
-                        not cheap.
+      - "act_red"    : signal is RED — crisis positioning window. VIX may be
+                        calm but Undertow's boardroom has escalated due to
+                        structural stress (yield curve, vol-of-vol, positioning).
+                        Buy hedges NOW while absolute vol still recoverable,
+                        before panic spike reprices them 3-5x higher.
       - "act"        : signal has JUST crossed from GREEN into AMBER (first
                         AMBER reading after a GREEN one) — the clearest
                         version of the early-tremor buy window.
@@ -186,7 +188,7 @@ def classify_window(today, history):
     score = today["composite"]["score"]
 
     if signal == "RED":
-        return "too_late", None
+        return "act_red", None
 
     prev = history[-1] if history else None
     if prev is None:
@@ -382,16 +384,19 @@ def render_report(today, window, prev_score, ideas, state, dry_run):
             "cheap. Draft advisory ideas below — nothing has been placed, "
             "review and execute manually in IBKR if you agree."
         )
-    elif window == "too_late":
+    elif window == "act_red":
         lines.append(
-            "🔴 TOO LATE FOR CHEAP PREMIUM — signal is RED. If you don't "
-            "already hold insurance, options here are pricing in fear, not "
-            "calm. Focus below shifts to reviewing any open hedges rather "
-            "than opening fresh ones."
+            "🔴 CRISIS POSITIONING — signal is RED. Undertow's boardroom has "
+            "escalated due to structural stress (30Y at 5.40%, VVIX 90+, "
+            "small-cap bleed, positioning stretched). VIX is still calm (15) "
+            "but Undertow sees fragility. **BUY HEDGES NOW** while absolute "
+            "vol is still recoverable — before panic reprices them 3-5x higher. "
+            "ALSO accumulate Glint's quality survivors on any dips. Draft "
+            "positions below — execute manually in IBKR."
         )
     lines.append("")
 
-    if window == "act":
+    if window in ("act", "act_red"):
         lines.append("--- Draft trade ideas (not executed) ---")
         lines.append("")
         lines.append("Shorts / insurance:")
