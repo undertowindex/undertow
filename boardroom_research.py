@@ -20,7 +20,7 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 RESEARCH_MODEL = "claude-haiku-4-5-20251001"
-SYNTHESIS_MODEL = "claude-3-5-sonnet-20241022"  # Use stable Sonnet model for synthesis
+SYNTHESIS_MODEL = "claude-sonnet-5"  # Valid current Sonnet model for synthesis
 
 # Roster rebalance (2026-07-30): the original room leaned entirely toward
 # crash-callers, which pre-loads the panel bearish regardless of the data.
