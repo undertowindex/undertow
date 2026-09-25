@@ -93,12 +93,45 @@ def _call_anthropic(api_key, model, prompt, max_tokens, use_search, timeout):
 
 def research_living_member(api_key, name, lens, signal, data_text, flags_text):
     date_str = datetime.datetime.now().strftime("%d %B %Y")
-    prompt = f"""Today is {date_str}. You are {name}, known for {lens}.
 
-Given today's Undertow market data and stress flags below, apply your documented investment framework to assess the current market conditions. Cast a vote on whether the Undertow signal ({signal}) should be CONFIRMED, UPGRADED (more severe), or DOWNGRADED (less severe).
+    # Tier 1: Try web search for recent public commentary
+    tier1_prompt = f"""Today is {date_str}. You are {name}, known for {lens}.
 
-Output EXACTLY this format, nothing else:
-TAKE: 2-3 sentences applying your {lens} framework to the data below.
+Search for recent public statements, interviews, market commentary, or published views from {name} in the last 30-60 days. If you find substantive recent material, provide:
+
+TAKE: 3-4 sentences of their recent view on market conditions
+VOTE: CONFIRM or UPGRADE or DOWNGRADE
+
+If you find NO recent public commentary, respond with exactly:
+NO_RECENT_COMMENTARY"""
+
+    try:
+        text = _call_anthropic(api_key, RESEARCH_MODEL, tier1_prompt, 700, use_search=True, timeout=60)
+
+        # Check if web search found recent commentary
+        if "NO_RECENT_COMMENTARY" not in text:
+            take_m = re.search(r"TAKE:\s*(.+?)(?=\nVOTE:)", text, re.IGNORECASE | re.DOTALL)
+            vote_m = re.search(r"VOTE:\s*(CONFIRM|UPGRADE|DOWNGRADE)", text, re.IGNORECASE)
+
+            if take_m and vote_m:
+                return {
+                    "name": name,
+                    "lens": lens,
+                    "found": True,
+                    "take": take_m.group(1).strip(),
+                    "vote": vote_m.group(1).upper(),
+                    "sources": "recent public commentary",
+                }
+    except Exception as e:
+        print(f"  ℹ️  Web search for {name} failed, falling back to framework: {e}", flush=True)
+
+    # Tier 2: Framework-based analysis fallback
+    tier2_prompt = f"""Today is {date_str}. You are {name}, known for {lens}.
+
+Given today's Undertow market data and stress flags below, apply your documented investment framework to assess current market conditions. Cast a vote on whether the Undertow signal ({signal}) should be CONFIRMED, UPGRADED (more severe), or DOWNGRADED (less severe).
+
+Output EXACTLY this format:
+TAKE: 3-4 sentences applying your {lens} framework to the data.
 VOTE: CONFIRM or UPGRADE or DOWNGRADE
 
 Current real Undertow market data:
@@ -107,9 +140,9 @@ Current real Undertow market data:
 Active stress flags:
 {flags_text}
 
-Be concise and grounded only in the data provided above."""
+Be specific and grounded in the data."""
 
-    text = _call_anthropic(api_key, RESEARCH_MODEL, prompt, 300, use_search=False, timeout=30)
+    text = _call_anthropic(api_key, RESEARCH_MODEL, tier2_prompt, 700, use_search=False, timeout=30)
 
     take_m = re.search(r"TAKE:\s*(.+?)(?=\nVOTE:)", text, re.IGNORECASE | re.DOTALL)
     vote_m = re.search(r"VOTE:\s*(CONFIRM|UPGRADE|DOWNGRADE)", text, re.IGNORECASE)
@@ -117,10 +150,10 @@ Be concise and grounded only in the data provided above."""
     return {
         "name": name,
         "lens": lens,
-        "found": True,  # Framework-based, always present
-        "take": take_m.group(1).strip() if take_m else text.strip()[:300],
-        "vote": vote_m.group(1).upper() if vote_m else "CONFIRM",  # Default to CONFIRM if parsing fails
-        "sources": "framework analysis",
+        "found": True,
+        "take": take_m.group(1).strip() if take_m else text.strip()[:700],
+        "vote": vote_m.group(1).upper() if vote_m else "CONFIRM",
+        "sources": "framework analysis (no recent commentary found)",
     }
 
 
@@ -182,7 +215,7 @@ Live market data:
 Active stress flags:
 {flags_text}
 
-LIVING MEMBERS (1-12): each has applied their documented framework to today's market data. You MUST base each living member's entry on their framework take verbatim in substance - do not add positions or opinions beyond it - and you MUST keep their vote exactly as given. Every member casts a vote (framework-based, not dependent on recent news).
+LIVING MEMBERS (1-12): each has been researched for recent public commentary first; if found, their take reflects that. If no recent commentary was available, their take reflects their documented framework applied to today's data. You MUST base each living member's entry on their researched take verbatim in substance - do not add positions or opinions beyond it - and you MUST keep their vote exactly as given. Every member casts a vote (either from recent commentary or from framework analysis).
 
 {research_text}
 
