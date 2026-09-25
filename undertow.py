@@ -381,12 +381,13 @@ def get_layer3b():
 
         if cot_data:
             report_date_str = cot_data[0].get("report_date_as_yyyy_mm_dd", "")[:10]
-            # FRESHNESS GATE: Only use COT data if it's current week (≤8 days old)
-            # COT publishes every Friday 15:30 EST for positions as of Tuesday. Allow up to 8 days for Friday→next Friday.
+            # FRESHNESS GATE: Only use COT data if it's current week (≤10 days old)
+            # COT publishes every Friday 15:30 EST for positions as of Tuesday. Allow up to 10 days to account for
+            # Socrata API indexing lag. Ideally we'd fetch directly from CFTC or CME, but this covers the current feed.
             try:
                 report_date = datetime.datetime.strptime(report_date_str, "%Y-%m-%d")
                 days_old = (datetime.datetime.now() - report_date).days
-                if days_old > 8:
+                if days_old > 10:
                     # REJECT stale data — do not use it in scoring
                     flags.append(f"⚠️  COT: STALE DATA ({days_old} days old) — rejecting, awaiting fresh weekly report")
                     data["cot_report_date"] = report_date_str
