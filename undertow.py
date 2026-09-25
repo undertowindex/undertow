@@ -910,8 +910,8 @@ Format clearly with each member's name bolded."""
     try:
         return call_anthropic_text(
             {
-                "model": "claude-sonnet-4-6",
-                "max_tokens": 4500,
+                "model": "claude-3-5-haiku-20241022",
+                "max_tokens": 6500,
                 "tools": [{"type": "web_search_20250305", "name": "web_search"}],
                 "messages": [{"role": "user", "content": prompt}]
             },
@@ -1026,8 +1026,8 @@ Be specific. No waffle."""
     try:
         return call_anthropic_text(
             {
-                "model": "claude-sonnet-4-6",
-                "max_tokens": 1000,
+                "model": "claude-3-5-haiku-20241022",
+                "max_tokens": 2500,
                 "messages": [{"role": "user", "content": prompt}]
             },
             timeout=45,
