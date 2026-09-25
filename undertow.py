@@ -121,7 +121,7 @@ def fred_get(series_id, retries=4, backoff_seconds=3):
 # ─────────────────────────────────────────────
 def get_layer1():
     try:
-        tickers = yf_download_with_retry("SPY RSP QQQ ^VIX NVDA", period="5d", interval="1d")
+        tickers = yf_download_with_retry("SPY RSP QQQ ^VIX ^VVIX NVDA", period="5d", interval="1d")
         close = tickers["Close"]
 
         spy = float(close["SPY"].dropna().iloc[-1])
@@ -131,6 +131,7 @@ def get_layer1():
         nvda = float(close["NVDA"].dropna().iloc[-1])
         nvda_prev = float(close["NVDA"].dropna().iloc[-2])
         vix = float(close["^VIX"].dropna().iloc[-1])
+        vvix = float(close["^VVIX"].dropna().iloc[-1])
         last_bar_date = close["SPY"].dropna().index[-1].strftime("%Y-%m-%d")
 
         spy_chg = (spy - spy_prev) / spy_prev * 100
@@ -151,6 +152,16 @@ def get_layer1():
             score += 1
             flags.append(f"VIX creeping at {vix:.1f}")
 
+        if vvix > 120:
+            score += 2
+            flags.append(f"VVIX extreme at {vvix:.1f} — fear is chaotic/disorderly")
+        elif vvix > 100:
+            score += 1
+            flags.append(f"VVIX elevated at {vvix:.1f} — instability building")
+        elif vvix < 70:
+            score += 1
+            flags.append(f"VVIX very low at {vvix:.1f} — dangerous complacency")
+
         if ratio_chg < -0.5:
             score += 2
             flags.append(f"RSP/SPY ratio falling {ratio_chg:.2f}% — rally narrowing (bad sign)")
@@ -164,13 +175,13 @@ def get_layer1():
 
         return {
             "score": score,
-            "max": 5,
+            "max": 7,
             "flags": flags,
             "data": {
                 "SPY": round(spy, 2), "SPY_chg": round(spy_chg, 2),
                 "RSP": round(rsp, 2), "RSP_chg": round(rsp_chg, 2),
                 "NVDA": round(nvda, 2), "NVDA_chg": round(nvda_chg, 2),
-                "VIX": round(vix, 2),
+                "VIX": round(vix, 2), "VVIX": round(vvix, 2),
                 "RSP_SPY_ratio": round(rsp_spy_ratio, 4),
                 "RSP_SPY_ratio_chg": round(ratio_chg, 2),
                 "last_bar_date": last_bar_date
@@ -232,6 +243,24 @@ def get_layer2():
             score += 1
             flags.append(f"HY spreads elevated at {hy:.2f}%")
 
+        # MOVE Index: Bond market volatility (parallel to VIX for bonds)
+        try:
+            move_data = yf_download_with_retry("^MOVE", period="1d", interval="1d")
+            if not move_data.empty:
+                move = float(move_data["Close"].iloc[-1])
+                data["move_index"] = round(move, 2)
+                if move > 150:
+                    score += 2
+                    flags.append(f"MOVE Index extreme at {move:.1f} — bond market panic")
+                elif move > 120:
+                    score += 2
+                    flags.append(f"MOVE Index elevated at {move:.1f} — bond volatility spike")
+                elif move > 100:
+                    score += 1
+                    flags.append(f"MOVE Index rising at {move:.1f} — bond market stress")
+        except Exception as e:
+            pass  # MOVE fetch is optional, don't fail Layer 2 on it
+
         # Cross-asset divergence: Bonds selling into low VIX = hidden stress
         try:
             vix_data = yf_download_with_retry("^VIX", period="1d", interval="1d")
@@ -248,7 +277,7 @@ def get_layer2():
     except Exception as e:
         flags.append(f"Layer 2 error: {e}")
 
-    return {"score": score, "max": 6, "flags": flags, "data": data}
+    return {"score": score, "max": 8, "flags": flags, "data": data}
 
 # ─────────────────────────────────────────────
 # LAYER 3: MACRO TREMORS
@@ -776,17 +805,16 @@ def get_layer3e(chain=None):
     return {"score": score, "max": 2, "flags": flags, "data": data}
 
 def compute_score(l1, l2, l3, l3b, l3c, l3d, l3e):
-    # l3c was re-enabled 2026-08-24 (see get_layer3c) - now derived live from
-    # the SPY options chain instead of the dead CBOE archive, max 2 again.
-    # The live max is 25. Thresholds at 8/15 out of 25 - same +1/+1 pattern
-    # used for each prior 2-point layer addition (previously 7/14 out of 23).
+    # 2026-09-25: Added VVIX to L1 (+2 max) and MOVE to L2 (+2 max). New max = 31.
+    # Previous max was 25 with thresholds at 8/15 (GREEN ≤8, AMBER 9-15, RED ≥16).
+    # Scaling new thresholds: 8/25*31 ≈ 10 and 15/25*31 ≈ 19 (maintains roughly same signal distribution).
     total = l1["score"] + l2["score"] + l3["score"] + l3b["score"] + l3c["score"] + l3d["score"] + l3e["score"]
 
-    if total <= 8:
+    if total <= 10:
         signal = "GREEN"
         emoji = "🟢"
         summary = "Markets calm. No significant stress signals detected."
-    elif total <= 15:
+    elif total <= 19:
         signal = "AMBER"
         emoji = "🟡"
         summary = "Elevated risk. Multiple stress signals present. Watch closely."
@@ -795,7 +823,7 @@ def compute_score(l1, l2, l3, l3b, l3c, l3d, l3e):
         emoji = "🔴"
         summary = "High alert. Significant macro stress across multiple indicators."
 
-    return {"score": total, "max": 25, "signal": signal, "emoji": emoji, "summary": summary}
+    return {"score": total, "max": 31, "signal": signal, "emoji": emoji, "summary": summary}
 
 # ─────────────────────────────────────────────
 # LAYER 5: THE BOARDROOM
