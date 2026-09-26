@@ -13,6 +13,17 @@ from boardroom_research import (
     run_glint_review, log_run,
 )
 
+try:
+    from undertow_new_indicators import (
+        fetch_breadth_indicator, fetch_vix_term_structure,
+        fetch_ted_spread, fetch_qqq_put_call_ratio,
+        calculate_shadow_score
+    )
+    SHADOW_INDICATORS_AVAILABLE = True
+except ImportError:
+    SHADOW_INDICATORS_AVAILABLE = False
+    print("⚠️  Shadow indicators module not available", flush=True)
+
 # ─────────────────────────────────────────────
 def yf_download_with_retry(tickers, retries=3, backoff_seconds=3, **kwargs):
     """yf.download wrapper with retries. Without this, a transient fetch
@@ -1068,7 +1079,7 @@ Be specific. No waffle."""
 # ─────────────────────────────────────────────
 # LAYER 7: EMAIL via RESEND
 # ─────────────────────────────────────────────
-def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", glint_html="", sanity_warnings=None, final_signal_data=None, glint_review="", extra_flags=None):
+def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", glint_html="", sanity_warnings=None, final_signal_data=None, glint_review="", extra_flags=None, shadow_output=""):
     """Returns True only on a confirmed 200 from Resend. This is an
     early-warning system - a report that silently failed to send on the
     one day it mattered is worse than no report at all, so callers must
@@ -1155,6 +1166,10 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", g
 <div style="background: #1a1a1a; padding: 15px; border-radius: 4px; white-space: pre-wrap; line-height: 1.6;">
 {trade_ideas}
 </div>
+{f'''<h3 style="color: #f0c040;">🔬 Shadow Indicators (Test Mode)</h3>
+<div style="background: #1a1a1a; padding: 15px; border-radius: 4px; white-space: pre-wrap; line-height: 1.6; font-family: monospace; font-size: 13px;">
+{shadow_output}
+</div>''' if shadow_output else ''}
 <h3 style="color: #f0c040;">📊 IBKR Portfolio</h3>
 <div style="background: #1a1a1a; padding: 15px; border-radius: 4px; white-space: pre-wrap; line-height: 1.6; font-family: monospace; font-size: 13px;">
 {layer8_html}
@@ -1530,6 +1545,38 @@ def main():
     if "Trade ideas error:" in trade_ideas:
         sanity_warnings.append("🎯 Trade Ideas API call FAILED — section shows the error message, not ideas.")
 
+    # Shadow indicators (test mode, Sep 26 - Oct 23)
+    shadow_output = ""
+    if SHADOW_INDICATORS_AVAILABLE:
+        try:
+            print("\n[Shadow Indicators] Running four new leading indicators (test mode)...", flush=True)
+            breadth, breadth_status = fetch_breadth_indicator()
+            vix_term, vix_status = fetch_vix_term_structure()
+            ted, ted_status = fetch_ted_spread()
+            qqq_ratio, qqq_status = fetch_qqq_put_call_ratio()
+            shadow_score = calculate_shadow_score(breadth, vix_term, ted, qqq_ratio)
+
+            print(f"  Market Breadth: {breadth:.1f}% [{breadth_status}]" if breadth else f"  Market Breadth: None [{breadth_status}]", flush=True)
+            print(f"  VIX Term Ratio: {vix_term:.3f} [{vix_status}]" if vix_term else f"  VIX Term Ratio: None [{vix_status}]", flush=True)
+            print(f"  TED Spread: {ted:.1f}bps [{ted_status}]" if ted else f"  TED Spread: None [{ted_status}]", flush=True)
+            print(f"  QQQ Put/Call: {qqq_ratio:.2f} [{qqq_status}]" if qqq_ratio else f"  QQQ Put/Call: None [{qqq_status}]", flush=True)
+            print(f"  Shadow Score: {shadow_score}/35", flush=True)
+
+            shadow_output = (
+                f"\n📊 SHADOW INDICATORS (Test Period: Sep 26 — Oct 23)\n"
+                f"Market Breadth: {breadth:.1f}% [{breadth_status}]\n"
+                f"VIX Term Ratio: {vix_term:.3f} [{vix_status}]\n"
+                f"TED Spread: {ted:.1f}bps [{ted_status}]\n"
+                f"QQQ Put/Call: {qqq_ratio:.2f} [{qqq_status}]\n"
+                f"Shadow Score: {shadow_score}/35\n"
+                f"(Running in parallel — does NOT change RED/AMBER/GREEN signal until validated)"
+            ) if (breadth and vix_term and ted and qqq_ratio) else f"Shadow indicators incomplete (one or more failed to fetch)"
+        except Exception as e:
+            print(f"  ⚠️  Shadow indicators error: {e}", flush=True)
+            shadow_output = f"Shadow indicators unavailable: {e}"
+    else:
+        shadow_output = "Shadow indicators module not loaded"
+
     print("\n[Layer 8] Pulling IBKR portfolio...")
     layer8_data = get_layer8()
     layer8_html = format_layer8_for_email(layer8_data)
@@ -1554,7 +1601,7 @@ def main():
     publish_ark_handoff(ark_inputs, ARK_HANDOFF_GIST_ID, GITHUB_GIST_TOKEN)
 
     print("\n[Layer 7] Sending email report...")
-    email_sent = send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html, glint_html, sanity_warnings, final_signal_data, glint_review, extra_flags=l3b["flags"] + l3d["flags"] + l3e["flags"])
+    email_sent = send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html, glint_html, sanity_warnings, final_signal_data, glint_review, extra_flags=l3b["flags"] + l3d["flags"] + l3e["flags"], shadow_output=shadow_output)
 
     if not email_sent:
         print("\n" + "=" * 60)
