@@ -9,9 +9,23 @@ These are designed to show early warning signals 2–5 days before major reprici
 """
 
 import os
+import time
 import datetime
 import requests
 import yfinance as yf
+
+
+def yf_download_with_retry(tickers, retries=3, backoff_seconds=2, **kwargs):
+    """yf.download wrapper with retries to handle transient network issues."""
+    last_error = None
+    for attempt in range(1, retries + 1):
+        try:
+            return yf.download(tickers, progress=False, **kwargs)
+        except Exception as e:
+            last_error = e
+            if attempt < retries:
+                time.sleep(backoff_seconds * attempt)
+    raise last_error
 
 
 def fetch_breadth_indicator():
@@ -23,7 +37,7 @@ def fetch_breadth_indicator():
     try:
         # Sample of S&P 500 leaders across sectors
         tickers = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "TSLA", "JPM", "BAC", "V", "MA", "JNJ", "PG", "XOM", "CVX"]
-        hist = yf.download(tickers, period="60d", progress=False, timeout=10)["Adj Close"]
+        hist = yf_download_with_retry(tickers, period="60d", timeout=10)["Adj Close"]
 
         if hist is None or hist.empty:
             return None, "yfinance returned empty"
@@ -57,7 +71,7 @@ def fetch_vix_term_structure():
     """
     try:
         # Fetch VIX over last 5 days to see momentum
-        vix_hist = yf.download("^VIX", period="5d", progress=False, timeout=10)["Close"]
+        vix_hist = yf_download_with_retry("^VIX", period="5d", timeout=10)["Close"]
 
         if vix_hist is None or vix_hist.empty or len(vix_hist) < 2:
             return None, "VIX data too short"
