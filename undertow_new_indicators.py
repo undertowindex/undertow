@@ -8,6 +8,7 @@ These are designed to show early warning signals 2–5 days before major reprici
 4. QQQ Put/Call Ratio — tech-sector institutional hedging
 """
 
+import os
 import datetime
 import requests
 import yfinance as yf
@@ -17,91 +18,126 @@ def fetch_breadth_indicator():
     """Market Breadth: % of S&P 500 stocks trading above their 50-day MA.
 
     Signal: drops below 40% → 2-3 day warning before SPY/ES rollover.
-    Data source: Free yfinance (bulk download required, or IVE/DVY proxies).
-
-    For now: fetch SPY component sample and extrapolate. Full breadth requires
-    local cached SP500 ticker list (handled in undertow main integration).
+    Data source: yfinance (sample of large-cap leaders).
     """
     try:
-        # Quick proxy: track a few sector leaders
-        tickers = ["AAPL", "MSFT", "NVDA", "TSLA", "JPM", "V", "JNJ", "WMT"]
-        hist = yf.download(tickers, period="60d", progress=False)["Adj Close"]
+        # Sample of S&P 500 leaders across sectors
+        tickers = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "TSLA", "JPM", "BAC", "V", "MA", "JNJ", "PG", "XOM", "CVX"]
+        hist = yf.download(tickers, period="60d", progress=False, timeout=10)["Adj Close"]
 
-        if hist.empty:
-            return None, "Data unavailable"
+        if hist is None or hist.empty:
+            return None, "yfinance returned empty"
 
-        ma50 = hist.rolling(50).mean()
-        above_ma = (hist.iloc[-1] > ma50.iloc[-1]).sum()
-        breadth_pct = 100 * above_ma / len(tickers)
+        # Calculate 50-day MA
+        ma50 = hist.rolling(window=50).mean()
 
-        # Health check
-        status = "NORMAL" if breadth_pct > 50 else ("CAUTION" if breadth_pct > 40 else "ALERT")
-        return breadth_pct, status
+        # Count how many are above their 50-day MA
+        above_ma_count = (hist.iloc[-1] > ma50.iloc[-1]).sum()
+        breadth_pct = 100.0 * above_ma_count / len(tickers)
+
+        # Status thresholds
+        if breadth_pct > 50:
+            status = "NORMAL"
+        elif breadth_pct > 40:
+            status = "CAUTION"
+        else:
+            status = "ALERT"
+
+        return round(breadth_pct, 1), status
     except Exception as e:
-        return None, f"Breadth error: {e}"
+        print(f"  ⚠️  Breadth fetch error: {type(e).__name__}: {str(e)[:60]}", flush=True)
+        return None, f"Error: {type(e).__name__}"
 
 
 def fetch_vix_term_structure():
-    """VIX Term Structure: compare 1-month vs 30-day implied vol.
+    """VIX Term Structure: 1-month IV vs recent daily change.
 
-    Signal: when ratio flips from contango (30d > 1m) to backwardation (30d < 1m),
-    volatility term curve inversion shows 3–5 day warning before vol spike.
-
-    Data source: VIX (1-month) vs VIXV (calc from option chains, or FRED proxy).
-    For MVP: use VIX and a derived metric from SPY options chain.
+    Signal: ratio flips from contango to backwardation → 3-5 day warning.
+    Data source: yfinance (^VIX).
     """
     try:
-        # VIX is 1-month; fetch 30-day vol proxy from SPY options
-        spy = yf.Ticker("SPY")
-        opts = spy.option_chain()  # grabs nearest expiry
+        # Fetch VIX over last 5 days to see momentum
+        vix_hist = yf.download("^VIX", period="5d", progress=False, timeout=10)["Close"]
 
-        if opts.calls.empty or opts.puts.empty:
-            return None, "Options data unavailable"
+        if vix_hist is None or vix_hist.empty or len(vix_hist) < 2:
+            return None, "VIX data too short"
 
-        # Rough 30-day vol: slightly higher than near-term, use call IV median
-        vix_proxy = yf.download("^VIX", period="1d", progress=False)["Close"]
-        if vix_proxy.empty:
-            return None, "VIX data unavailable"
+        vix_current = float(vix_hist.iloc[-1])
+        vix_prev = float(vix_hist.iloc[-2])
 
-        vix_current = vix_proxy.iloc[-1]
-        # Simple heuristic: if VIX is rising faster than 5% day-over-day, term structure inverting
-        vix_prev = vix_proxy.iloc[-2] if len(vix_proxy) > 1 else vix_current
+        # Term ratio: current / previous day
         term_ratio = vix_current / vix_prev if vix_prev > 0 else 1.0
 
-        # Status based on shape: contango vs backwardation proxy
+        # Status: spiking = CAUTION, flat = NORMAL, dropping = NORMAL
         if term_ratio > 1.03:
-            status = "CAUTION"  # VIX spiking, structure flattening
-        elif term_ratio < 0.98:
-            status = "NORMAL"  # VIX calm, structure steep
+            status = "CAUTION"  # VIX spiking fast
+        elif term_ratio > 1.01:
+            status = "WATCH"    # Slight spike
         else:
-            status = "WATCH"  # Flattening
+            status = "NORMAL"   # Calm or dropping
 
-        return term_ratio, status
+        return round(term_ratio, 3), status
     except Exception as e:
-        return None, f"VIX term error: {e}"
+        print(f"  ⚠️  VIX term fetch error: {type(e).__name__}: {str(e)[:60]}", flush=True)
+        return None, f"Error: {type(e).__name__}"
 
 
 def fetch_ted_spread():
-    """TED Spread: 3-month SOFR minus fed funds rate.
+    """TED Spread: 3-month SOFR minus fed funds rate (basis points).
 
-    Signal: widens 48–72 hours before credit events or risk-off repricing.
-    Data source: FRED (SOFR3M, FEDFUNDS). Free, very reliable.
+    Signal: widens 48-72 hours before credit events.
+    Data source: FRED API (requires FRED_API_KEY in environment).
     """
     try:
-        import fredapi
+        fred_key = os.environ.get("FRED_API_KEY", "").strip()
 
-        fred_key = "YOUR_FRED_API_KEY"  # User must set in environment
-        fred = fredapi.Fred(api_key=fred_key)
+        if not fred_key:
+            return None, "FRED_API_KEY not set"
 
-        sofr3m = fred.get_series("SOFR3M")
-        fedfunds = fred.get_series("FEDFUNDS")
+        # Fetch SOFR 3M and Fed Funds from FRED
+        url_sofr = "https://api.stlouisfed.org/fred/series/observations"
+        url_ff = "https://api.stlouisfed.org/fred/series/observations"
 
-        if sofr3m.empty or fedfunds.empty:
-            return None, "FRED data unavailable"
+        params_sofr = {
+            "series_id": "SOFR3M",
+            "api_key": fred_key,
+            "file_type": "json",
+            "sort_order": "desc",
+            "limit": 1
+        }
+        params_ff = {
+            "series_id": "FEDFUNDS",
+            "api_key": fred_key,
+            "file_type": "json",
+            "sort_order": "desc",
+            "limit": 1
+        }
 
-        ted = sofr3m.iloc[-1] - fedfunds.iloc[-1]
+        r_sofr = requests.get(url_sofr, params=params_sofr, timeout=10)
+        r_ff = requests.get(url_ff, params=params_ff, timeout=10)
 
-        # Status: normal < 50bps, caution 50–80bps, alert > 80bps
+        r_sofr.raise_for_status()
+        r_ff.raise_for_status()
+
+        sofr_val = None
+        ff_val = None
+
+        for obs in r_sofr.json().get("observations", []):
+            if obs["value"] != ".":
+                sofr_val = float(obs["value"])
+                break
+
+        for obs in r_ff.json().get("observations", []):
+            if obs["value"] != ".":
+                ff_val = float(obs["value"])
+                break
+
+        if sofr_val is None or ff_val is None:
+            return None, "FRED data missing"
+
+        ted = sofr_val - ff_val
+
+        # Status thresholds (basis points)
         if ted < 50:
             status = "NORMAL"
         elif ted < 80:
@@ -109,84 +145,93 @@ def fetch_ted_spread():
         else:
             status = "ALERT"
 
-        return ted, status
+        return round(ted, 1), status
     except Exception as e:
-        return None, f"TED spread error: {e}"
+        print(f"  ⚠️  TED spread fetch error: {type(e).__name__}: {str(e)[:60]}", flush=True)
+        return None, f"Error: {type(e).__name__}"
 
 
 def fetch_qqq_put_call_ratio():
     """QQQ Put/Call Ratio: institutional hedging on tech sector.
 
-    Signal: ratio > 1.2 (more puts than calls) shows early tech sector hedge,
-    separate from SPY. Often precedes SPY put/call shift by 1–2 days.
-
-    Data source: yfinance options chain (QQQ).
+    Signal: ratio > 1.2 → early tech sector hedge, precedes selloff 1-2 days.
+    Data source: yfinance (QQQ options chain).
     """
     try:
         qqq = yf.Ticker("QQQ")
-        opts = qqq.option_chain()
+        opts = qqq.option_chain(date=None)  # Nearest expiry
+
+        if opts is None or opts.calls is None or opts.puts is None:
+            return None, "QQQ options unavailable"
 
         if opts.calls.empty or opts.puts.empty:
-            return None, "QQQ options data unavailable"
+            return None, "No options data"
 
-        # Sum open interest across all strikes for this expiry
+        # Sum open interest
         call_oi = opts.calls["openInterest"].sum()
         put_oi = opts.puts["openInterest"].sum()
 
-        if call_oi == 0:
-            return None, "No call open interest"
+        if call_oi == 0 or call_oi is None:
+            return None, "Zero call OI"
 
         ratio = put_oi / call_oi
 
-        # Status: < 1.0 = call skew, > 1.2 = put protection spike
+        # Status thresholds
         if ratio < 1.0:
-            status = "NORMAL"
+            status = "NORMAL"   # Call skew, bullish
         elif ratio < 1.2:
-            status = "WATCH"
+            status = "WATCH"    # Balanced
         else:
-            status = "CAUTION"
+            status = "CAUTION"  # Put protection spike
 
-        return ratio, status
+        return round(ratio, 2), status
     except Exception as e:
-        return None, f"QQQ put/call error: {e}"
+        print(f"  ⚠️  QQQ put/call fetch error: {type(e).__name__}: {str(e)[:60]}", flush=True)
+        return None, f"Error: {type(e).__name__}"
 
 
 def calculate_shadow_score(breadth, vix_term, ted, qqq_ratio):
-    """Combine four new indicators into a shadow score out of 35.
+    """Combine four indicators into a 0-35 shadow score.
 
-    This is NOT a replacement for the primary 7-layer score; it's validation.
-    Each indicator contributes 0–10 points (with some contributing 0–5):
-    - Breadth > 50% = 0 stress, < 40% = 10 stress
-    - VIX term ratio near 1.0 = 0 stress, ratio > 1.1 = 10 stress
-    - TED < 50bps = 0 stress, > 80bps = 10 stress
-    - QQQ ratio < 1.0 = 0 stress, > 1.2 = 10 stress
-
-    Max shadow score = 40 (but shown as 35 to match 7-layer max).
+    Each indicator contributes stress points:
+    - Breadth: 100% = 0 stress, 0% = 10 stress
+    - VIX term: 1.0 = 0 stress, 1.1+ = 10 stress
+    - TED: 0 bps = 0 stress, 100 bps = 10 stress
+    - QQQ ratio: 1.0 = 0 stress, 1.3+ = 10 stress
     """
     score = 0
+    count = 0
 
     if breadth is not None:
-        # 100% = 0 stress, 0% = 10 stress
-        breadth_stress = max(0, 10 * (50 - breadth) / 50)
+        # Higher breadth = less stress
+        breadth_stress = max(0, min(10, 10 * (50 - breadth) / 50))
         score += breadth_stress
+        count += 1
 
     if vix_term is not None:
-        # ratio = 1.0 = 0 stress, ratio = 1.1+ = 10 stress
+        # Higher ratio = more stress
         term_stress = max(0, min(10, 100 * (vix_term - 1.0)))
         score += term_stress
+        count += 1
 
     if ted is not None:
-        # 0 bps = 0 stress, 100 bps = 10 stress
+        # Higher TED = more stress
         ted_stress = max(0, min(10, ted / 10))
         score += ted_stress
+        count += 1
 
     if qqq_ratio is not None:
-        # 1.0 = 0 stress, 1.3+ = 10 stress
+        # Higher ratio = more stress
         ratio_stress = max(0, min(10, 100 * (qqq_ratio - 1.0)))
         score += ratio_stress
+        count += 1
 
-    # Normalize to 35-point scale
-    shadow_score = (score / 4) * (35 / 10)
+    if count == 0:
+        return None
+
+    # Normalize: average of available indicators, scaled to 35
+    avg_stress = score / count
+    shadow_score = (avg_stress / 10) * 35
     return round(shadow_score, 1)
 
 
@@ -194,16 +239,31 @@ if __name__ == "__main__":
     print("=== UNDERTOW SHADOW INDICATORS (Test Mode) ===\n")
 
     breadth, breadth_status = fetch_breadth_indicator()
-    print(f"Market Breadth: {breadth:.1f}% [{breadth_status}]")
+    if breadth is not None:
+        print(f"✓ Market Breadth: {breadth}% [{breadth_status}]")
+    else:
+        print(f"✗ Market Breadth: {breadth_status}")
 
     vix_term, vix_status = fetch_vix_term_structure()
-    print(f"VIX Term Ratio: {vix_term:.3f} [{vix_status}]")
+    if vix_term is not None:
+        print(f"✓ VIX Term Ratio: {vix_term} [{vix_status}]")
+    else:
+        print(f"✗ VIX Term Ratio: {vix_status}")
 
     ted, ted_status = fetch_ted_spread()
-    print(f"TED Spread: {ted:.1f}bps [{ted_status}]")
+    if ted is not None:
+        print(f"✓ TED Spread: {ted}bps [{ted_status}]")
+    else:
+        print(f"✗ TED Spread: {ted_status}")
 
     qqq_ratio, qqq_status = fetch_qqq_put_call_ratio()
-    print(f"QQQ Put/Call: {qqq_ratio:.2f} [{qqq_status}]")
+    if qqq_ratio is not None:
+        print(f"✓ QQQ Put/Call: {qqq_ratio} [{qqq_status}]")
+    else:
+        print(f"✗ QQQ Put/Call: {qqq_status}")
 
     shadow = calculate_shadow_score(breadth, vix_term, ted, qqq_ratio)
-    print(f"\nShadow Score: {shadow}/35")
+    if shadow is not None:
+        print(f"\nShadow Score: {shadow}/35")
+    else:
+        print("\nShadow Score: Unable to calculate (all indicators failed)")
