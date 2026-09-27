@@ -1083,7 +1083,92 @@ Be specific. No waffle."""
 # ─────────────────────────────────────────────
 # LAYER 7: EMAIL via RESEND
 # ─────────────────────────────────────────────
-def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", glint_html="", sanity_warnings=None, final_signal_data=None, glint_review="", extra_flags=None, shadow_output=""):
+def generate_dials_dashboard(score_data, l1, l2, l3, l3b, l3c, l3d, l3e, l8):
+    """Generate HTML dashboard showing 8 indicator dials (GREEN/AMBER/RED gauges).
+
+    Each dial shows: layer name, score/max, and colored gauge.
+    Stress threshold: ≤30% green, ≤60% amber, >60% red.
+    """
+    layers = [
+        ("Equity Pulse", l1),
+        ("Credit & Yield", l2),
+        ("Macro Tremors", l3),
+        ("COT & Repo", l3b),
+        ("Put/Call Ratio", l3c),
+        ("SKEW Index", l3d),
+        ("Dealer Gamma", l3e),
+        ("TED Spread", l8),
+    ]
+
+    dials_html = f"""
+<div style="background: #0d0d0d; padding: 20px; border-radius: 8px; margin: 20px 0;">
+  <h3 style="color: #f0c040; margin-top: 0; text-align: center;">📊 INDICATOR DIALS — State of the Nation</h3>
+
+  <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 20px;">
+"""
+
+    for layer_name, layer_data in layers:
+        score = layer_data["score"]
+        max_score = layer_data["max"]
+        stress_pct = (score / max_score * 100) if max_score > 0 else 0
+
+        # Determine color based on stress level
+        if stress_pct <= 30:
+            color = "#2ecc71"  # GREEN
+            status = "CALM"
+        elif stress_pct <= 60:
+            color = "#f39c12"  # AMBER
+            status = "CAUTION"
+        else:
+            color = "#e74c3c"  # RED
+            status = "STRESS"
+
+        # SVG gauge
+        gauge_svg = f"""
+<svg width="120" height="120" viewBox="0 0 120 120" style="margin: auto; display: block;">
+  <!-- Background circle -->
+  <circle cx="60" cy="60" r="50" fill="none" stroke="#333" stroke-width="8"/>
+
+  <!-- Colored arc (progress) -->
+  <circle cx="60" cy="60" r="50" fill="none" stroke="{color}" stroke-width="8"
+          stroke-dasharray="{stress_pct * 3.14}" stroke-dashoffset="0"
+          stroke-linecap="round" transform="rotate(-90 60 60)"/>
+
+  <!-- Center label -->
+  <text x="60" y="55" text-anchor="middle" font-size="18" font-weight="bold" fill="{color}">
+    {score}
+  </text>
+  <text x="60" y="72" text-anchor="middle" font-size="12" fill="#999">
+    /{max_score}
+  </text>
+</svg>
+"""
+
+        dials_html += f"""
+    <div style="text-align: center; background: #1a1a1a; padding: 12px; border-radius: 6px; border-left: 3px solid {color};">
+      {gauge_svg}
+      <p style="margin: 8px 0 0 0; font-size: 13px; color: #ddd;">
+        <strong>{layer_name}</strong>
+      </p>
+      <p style="margin: 4px 0 0 0; font-size: 11px; color: {color}; font-weight: bold;">
+        {status}
+      </p>
+    </div>
+"""
+
+    dials_html += """
+  </div>
+
+  <div style="text-align: center; font-size: 12px; color: #888;">
+    Green = calm (≤30% of max score) | Amber = caution (31–60%) | Red = stress (>60%)
+  </div>
+</div>
+"""
+
+    return dials_html
+
+
+def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", glint_html="", sanity_warnings=None, final_signal_data=None, glint_review="", extra_flags=None, shadow_output="", l3b=None, l3c=None, l3d=None, l3e=None, l8=None):
     """Returns True only on a confirmed 200 from Resend. This is an
     early-warning system - a report that silently failed to send on the
     one day it mattered is worse than no report at all, so callers must
@@ -1145,6 +1230,14 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", g
 </div>
 """
 
+    # Generate dials dashboard if layer data is provided
+    dials_html = ""
+    if l3b and l3c and l3d and l3e and l8:
+        try:
+            dials_html = generate_dials_dashboard(score_data, l1, l2, l3, l3b, l3c, l3d, l3e, l8)
+        except Exception as e:
+            print(f"  ⚠️  Dials generation failed: {e}", flush=True)
+
     html = f"""
 <html><body style="font-family: Arial, sans-serif; max-width: 700px; margin: auto; background: #0d0d0d; color: #e0e0e0; padding: 20px;">
 <h1 style="color: {signal_color}; border-bottom: 2px solid {signal_color}; padding-bottom: 10px;">
@@ -1155,6 +1248,7 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", g
   <h2 style="margin: 0; color: {signal_color};">Composite score: {score}/{score_data['max']} ({score_data['signal']})</h2>
   <p style="margin: 8px 0 0 0;">{score_data['summary']}</p>
 </div>
+{dials_html}
 {override_html}
 {sanity_html}
 <h3 style="color: #f0c040;">⚡ Active Stress Flags</h3>
@@ -1529,7 +1623,7 @@ def main():
     publish_ark_handoff(ark_inputs, ARK_HANDOFF_GIST_ID, GITHUB_GIST_TOKEN)
 
     print("\n[Layer 7] Sending email report...")
-    email_sent = send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html, glint_html, sanity_warnings, final_signal_data, glint_review, extra_flags=l3b["flags"] + l3d["flags"] + l3e["flags"], shadow_output=shadow_output)
+    email_sent = send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html, glint_html, sanity_warnings, final_signal_data, glint_review, extra_flags=l3b["flags"] + l3d["flags"] + l3e["flags"], shadow_output=shadow_output, l3b=l3b, l3c=l3c, l3d=l3d, l3e=l3e, l8=l8)
 
     if not email_sent:
         print("\n" + "=" * 60)
