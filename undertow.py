@@ -1088,6 +1088,7 @@ def generate_dials_dashboard(score_data, l1, l2, l3, l3b, l3c, l3d, l3e, l8):
 
     Each dial shows: layer name, score/max, and colored gauge.
     Stress threshold: ≤30% green, ≤60% amber, >60% red.
+    Shows "!" indicator when score=0 due to missing data (vs. actual zero stress).
     """
     layers = [
         ("Equity Pulse", l1),
@@ -1104,13 +1105,19 @@ def generate_dials_dashboard(score_data, l1, l2, l3, l3b, l3c, l3d, l3e, l8):
 <div style="background: #0d0d0d; padding: 20px; border-radius: 8px; margin: 20px 0;">
   <h3 style="color: #f0c040; margin-top: 0; text-align: center;">📊 INDICATOR DIALS — State of the Nation</h3>
 
-  <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 20px;">
+  <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px; margin-bottom: 20px;">
 """
 
     for layer_name, layer_data in layers:
         score = layer_data["score"]
         max_score = layer_data["max"]
         stress_pct = (score / max_score * 100) if max_score > 0 else 0
+
+        # Check if data is missing (empty data dict means failed fetch)
+        has_data = bool(layer_data.get("data"))
+
+        # Display score with "!" indicator if no data
+        score_display = f"{score}!" if (score == 0 and not has_data) else str(score)
 
         # Determine color based on stress level
         if stress_pct <= 30:
@@ -1136,7 +1143,7 @@ def generate_dials_dashboard(score_data, l1, l2, l3, l3b, l3c, l3d, l3e, l8):
 
   <!-- Center label -->
   <text x="60" y="55" text-anchor="middle" font-size="18" font-weight="bold" fill="{color}">
-    {score}
+    {score_display}
   </text>
   <text x="60" y="72" text-anchor="middle" font-size="12" fill="#999">
     /{max_score}
@@ -1160,7 +1167,7 @@ def generate_dials_dashboard(score_data, l1, l2, l3, l3b, l3c, l3d, l3e, l8):
   </div>
 
   <div style="text-align: center; font-size: 12px; color: #888;">
-    Green = calm (≤30% of max score) | Amber = caution (31–60%) | Red = stress (>60%)
+    Green = calm (≤30% of max score) | Amber = caution (31–60%) | Red = stress (>60%) | ! = no data available
   </div>
 </div>
 """
