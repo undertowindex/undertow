@@ -1336,12 +1336,14 @@ def get_layer8():
         if not fred_key:
             return {"score": 0, "max": 5, "flags": ["TED spread: FRED_API_KEY not set"], "data": {}}
 
-        # Fetch SOFR3M and FEDFUNDS from FRED
+        # Fetch 3-Month Treasury Bill Rate and Fed Funds Rate from FRED
+        # TED Spread = (3M SOFR or T-Bill) - (Fed Funds), measures credit stress
+        # Using DGS3MO (3-Month Treasury Bill) as proxy for short-term funding cost
         url_sofr = "https://api.stlouisfed.org/fred/series/observations"
         url_ff = "https://api.stlouisfed.org/fred/series/observations"
 
         params_sofr = {
-            "series_id": "SOFR3M",
+            "series_id": "DGS3MO",  # 3-Month Treasury Bill Rate (SOFR3M not available in FRED)
             "api_key": fred_key,
             "file_type": "json",
             "sort_order": "desc",
@@ -1361,12 +1363,12 @@ def get_layer8():
         r_sofr.raise_for_status()
         r_ff.raise_for_status()
 
-        sofr_val = None
+        tbill_val = None
         ff_val = None
 
         for obs in r_sofr.json().get("observations", []):
             if obs["value"] != ".":
-                sofr_val = float(obs["value"])
+                tbill_val = float(obs["value"])
                 break
 
         for obs in r_ff.json().get("observations", []):
@@ -1374,10 +1376,11 @@ def get_layer8():
                 ff_val = float(obs["value"])
                 break
 
-        if sofr_val is None or ff_val is None:
+        if tbill_val is None or ff_val is None:
             return {"score": 0, "max": 5, "flags": ["TED spread: FRED data missing"], "data": {}}
 
-        ted = sofr_val - ff_val
+        # TED Spread = 3M T-Bill Rate - Fed Funds Rate
+        ted = tbill_val - ff_val
 
         # Score thresholds (basis points)
         if ted < 50:
@@ -1399,7 +1402,7 @@ def get_layer8():
             "flags": flags,
             "data": {
                 "ted_spread_bps": ted,
-                "sofr_3m": sofr_val,
+                "tbill_3m": tbill_val,
                 "fed_funds": ff_val,
                 "ted_spread_date": date_str
             }
@@ -1420,13 +1423,13 @@ def format_layer8_for_email(layer8_data):
         return "📊 TED Spread: unavailable"
 
     ted = layer8_data["data"]["ted_spread_bps"]
-    sofr = layer8_data["data"]["sofr_3m"]
+    tbill = layer8_data["data"]["tbill_3m"]
     ff = layer8_data["data"]["fed_funds"]
     date_str = layer8_data["data"].get("ted_spread_date", "")
 
     lines = ["📊 TED SPREAD — CREDIT STRESS INDICATOR", ""]
     lines.append(f"TED Spread: {ted:.1f} basis points")
-    lines.append(f"SOFR 3M: {sofr:.3f}%")
+    lines.append(f"3M T-Bill: {tbill:.3f}%")
     lines.append(f"Fed Funds: {ff:.3f}%")
     lines.append(f"Date: {date_str}")
     lines.append("")
