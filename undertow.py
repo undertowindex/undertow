@@ -255,6 +255,7 @@ def get_layer2():
             flags.append(f"HY spreads elevated at {hy:.2f}%")
 
         # MOVE Index: Bond market volatility (parallel to VIX for bonds)
+        # CRITICAL for understanding bond market stress given elevated Treasury yields
         try:
             move_data = yf_download_with_retry("^MOVE", period="1d", interval="1d")
             if not move_data.empty:
@@ -269,8 +270,12 @@ def get_layer2():
                 elif move > 100:
                     score += 1
                     flags.append(f"MOVE Index rising at {move:.1f} — bond market stress")
+            else:
+                data["move_index"] = "UNAVAILABLE"
         except Exception as e:
-            pass  # MOVE fetch is optional, don't fail Layer 2 on it
+            # Log the fetch failure but don't fail Layer 2
+            data["move_index"] = f"FETCH_ERROR: {type(e).__name__}"
+            print(f"  ⚠️  MOVE Index fetch failed: {e}", flush=True)
 
         # Cross-asset divergence: Bonds selling into low VIX = hidden stress
         try:
@@ -1200,6 +1205,7 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", g
     signal_color = {"GREEN": "#2ecc71", "AMBER": "#f39c12", "RED": "#e74c3c"}.get(signal, "#999")
 
     # Extract VVIX and MOVE for explicit display
+    # MOVE is critical given elevated Treasury yields — always show it
     vvix_val = l1.get("data", {}).get("VVIX", "N/A")
     move_val = l2.get("data", {}).get("move_index", "N/A")
     indicator_display = ""
@@ -1207,8 +1213,9 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", g
         indicator_lines = []
         if vvix_val != "N/A":
             indicator_lines.append(f"VIX disorderliness (VVIX): {vvix_val}")
-        if move_val != "N/A":
-            indicator_lines.append(f"Bond volatility (MOVE): {move_val}")
+        # Always show MOVE (even fetch errors indicate data issues worth flagging)
+        move_display = move_val if move_val != "N/A" else "Unable to fetch"
+        indicator_lines.append(f"Bond volatility (MOVE Index): {move_display}")
         indicator_html = "".join(f"<li>{line}</li>" for line in indicator_lines)
         indicator_display = f"""<h3 style="color: #f0c040;">📊 Key Indicator Snapshot</h3>
 <ul style="background: #1a1a1a; padding: 15px 15px 15px 30px; border-radius: 4px;">
