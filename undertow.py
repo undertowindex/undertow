@@ -508,7 +508,7 @@ def _check_freshness(warnings, label, date_str, max_age_days=5):
         warnings.append(f"{label} sanity: date {date_str!r} not parseable")
 
 
-def run_sanity_checks(l1, l2, l3, l3b, l3c, l3d, l3e, l8):
+def run_sanity_checks(l1, l2, l3, l3b, l3c, l3d, l3e, l8, l9=None):
     warnings = []
 
     vix = l1["data"].get("vix")
@@ -588,7 +588,21 @@ def run_sanity_checks(l1, l2, l3, l3b, l3c, l3d, l3e, l8):
     if volume_b is not None and not (2500 <= volume_b <= 4000):
         warnings.append(f"Layer 8 sanity: SOFR volume {volume_b:.0f}B outside plausible range (2,500-4,000B)")
 
-    for label, layer in [("Layer 1", l1), ("Layer 2", l2), ("Layer 3", l3), ("Layer 3b", l3b), ("Layer 3c", l3c), ("Layer 3d", l3d), ("Layer 3e", l3e), ("Layer 8", l8)]:
+    nfci_val = None
+    if l9:
+        nfci_val = l9["data"].get("nfci_value")
+        if nfci_val is not None and not (-2 <= nfci_val <= 2):
+            warnings.append(f"Layer 9 sanity: NFCI {nfci_val:.2f} outside plausible range (-2 to 2)")
+        anfci_val = l9["data"].get("anfci_value")
+        if anfci_val is not None and not (-2 <= anfci_val <= 2):
+            warnings.append(f"Layer 9 sanity: ANFCI {anfci_val:.2f} outside plausible range (-2 to 2)")
+        _check_freshness(warnings, "Layer 9 (NFCI)", l9["data"].get("nfci_date"), max_age_days=7)
+
+    layer_list = [("Layer 1", l1), ("Layer 2", l2), ("Layer 3", l3), ("Layer 3b", l3b), ("Layer 3c", l3c), ("Layer 3d", l3d), ("Layer 3e", l3e), ("Layer 8", l8)]
+    if l9:
+        layer_list.append(("Layer 9", l9))
+
+    for label, layer in layer_list:
         if not (0 <= layer["score"] <= layer["max"]):
             warnings.append(f"{label} sanity: score {layer['score']} outside valid range 0-{layer['max']}")
         # A layer that produced zero data almost always means its fetch hit
@@ -828,16 +842,21 @@ def get_layer3e(chain=None):
 
     return {"score": score, "max": 2, "flags": flags, "data": data}
 
-def compute_score(l1, l2, l3, l3b, l3c, l3d, l3e, l8):
-    # 2026-09-27: Added Layer 8 SOFR funding stress (+5 max). New max = 36.
+def compute_score(l1, l2, l3, l3b, l3c, l3d, l3e, l8, l9=None):
+    # 2026-09-27: Added Layer 8 SOFR funding stress (+5 max). Max = 36.
+    # 2026-10-01: Added Layer 9 NFCI/ANFCI systemic risk (+5 max). Max = 41.
     # Scaled thresholds from old (max=31): 10/31*36 ≈ 12, 19/31*36 ≈ 22.
-    total = l1["score"] + l2["score"] + l3["score"] + l3b["score"] + l3c["score"] + l3d["score"] + l3e["score"] + l8["score"]
+    # New thresholds with L9: 12*41/36 ≈ 14, 22*41/36 ≈ 25.
+    l9_score = l9["score"] if l9 else 0
+    total = l1["score"] + l2["score"] + l3["score"] + l3b["score"] + l3c["score"] + l3d["score"] + l3e["score"] + l8["score"] + l9_score
 
-    if total <= 12:
+    max_score = 41 if l9 else 36
+
+    if total <= 14:
         signal = "GREEN"
         emoji = "🟢"
         summary = "Markets calm. No significant stress signals detected."
-    elif total <= 21:
+    elif total <= 25:
         signal = "AMBER"
         emoji = "🟡"
         summary = "Elevated risk. Multiple stress signals present. Watch closely."
@@ -846,7 +865,7 @@ def compute_score(l1, l2, l3, l3b, l3c, l3d, l3e, l8):
         emoji = "🔴"
         summary = "High alert. Significant macro stress across multiple indicators."
 
-    return {"score": total, "max": 36, "signal": signal, "emoji": emoji, "summary": summary}
+    return {"score": total, "max": max_score, "signal": signal, "emoji": emoji, "summary": summary}
 
 # ─────────────────────────────────────────────
 # LAYER 5: THE BOARDROOM
@@ -1091,8 +1110,8 @@ Be specific. No waffle."""
 # ─────────────────────────────────────────────
 # LAYER 7: EMAIL via RESEND
 # ─────────────────────────────────────────────
-def generate_dials_dashboard(score_data, l1, l2, l3, l3b, l3c, l3d, l3e, l8):
-    """Generate HTML dashboard showing 8 indicator dials (GREEN/AMBER/RED gauges).
+def generate_dials_dashboard(score_data, l1, l2, l3, l3b, l3c, l3d, l3e, l8, l9=None):
+    """Generate HTML dashboard showing 8-10 indicator dials (GREEN/AMBER/RED gauges).
 
     Each dial shows: layer name, score/max, and colored gauge.
     Stress threshold: ≤30% green, ≤60% amber, >60% red.
@@ -1108,6 +1127,10 @@ def generate_dials_dashboard(score_data, l1, l2, l3, l3b, l3c, l3d, l3e, l8):
         ("Dealer Gamma", l3e),
         ("SOFR Funding", l8),
     ]
+
+    # Add Layer 9 if available (Chicago Fed NFCI/ANFCI)
+    if l9:
+        layers.append(("NFCI Systemic Risk", l9))
 
     dials_html = f"""
 <div style="background: #0d0d0d; padding: 20px; border-radius: 8px; margin: 20px 0;">
@@ -1183,7 +1206,7 @@ def generate_dials_dashboard(score_data, l1, l2, l3, l3b, l3c, l3d, l3e, l8):
     return dials_html
 
 
-def build_data_quality_dashboard(l1, l2, l3, l3b, l3c, l3d, l3e, l8):
+def build_data_quality_dashboard(l1, l2, l3, l3b, l3c, l3d, l3e, l8, l9=None):
     """
     Build a data quality dashboard showing which feeds are live and which are missing.
     Returns HTML block and a data quality score (0-100, higher is better).
@@ -1199,6 +1222,11 @@ def build_data_quality_dashboard(l1, l2, l3, l3b, l3c, l3d, l3e, l8):
         "Layer 8 SOFR Rate": bool(l8.get("data", {}).get("sofr_3m_pct")),
         "Layer 8 SOFR Volume": bool(l8.get("data", {}).get("sofr_volume_b")),
     }
+
+    # Add Layer 9 if available
+    if l9:
+        feeds["Layer 9 NFCI"] = bool(l9.get("data", {}).get("nfci_value"))
+        feeds["Layer 9 ANFCI"] = bool(l9.get("data", {}).get("anfci_value"))
 
     live_feeds = sum(1 for v in feeds.values() if v)
     total_feeds = len(feeds)
@@ -1233,7 +1261,7 @@ def build_data_quality_dashboard(l1, l2, l3, l3b, l3c, l3d, l3e, l8):
     return html, quality_pct
 
 
-def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", glint_html="", sanity_warnings=None, final_signal_data=None, glint_review="", extra_flags=None, shadow_output="", l3b=None, l3c=None, l3d=None, l3e=None, l8=None, quality_html=""):
+def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", glint_html="", sanity_warnings=None, final_signal_data=None, glint_review="", extra_flags=None, shadow_output="", l3b=None, l3c=None, l3d=None, l3e=None, l8=None, l9=None, layer9_html="", quality_html=""):
     """Returns True only on a confirmed 200 from Resend. This is an
     early-warning system - a report that silently failed to send on the
     one day it mattered is worse than no report at all, so callers must
@@ -1299,9 +1327,9 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", g
 
     # Generate dials dashboard if layer data is provided
     dials_html = ""
-    if l3b and l3c and l3d and l3e and l8:
+    if l3b and l3c and l3d and l3e and l8 and l9:
         try:
-            dials_html = generate_dials_dashboard(score_data, l1, l2, l3, l3b, l3c, l3d, l3e, l8)
+            dials_html = generate_dials_dashboard(score_data, l1, l2, l3, l3b, l3c, l3d, l3e, l8, l9)
         except Exception as e:
             print(f"  ⚠️  Dials generation failed: {e}", flush=True)
 
@@ -1332,14 +1360,18 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", g
 <div style="background: #1a1a1a; padding: 15px; border-radius: 4px; white-space: pre-wrap; line-height: 1.6;">
 {trade_ideas}
 </div>
+{f'''<h3 style="color: #f0c040;">📊 NFCI SYSTEMIC RISK (Chicago Fed Weekly)</h3>
+<div style="background: #1a1a1a; padding: 15px; border-radius: 4px; white-space: pre-wrap; line-height: 1.6; font-family: monospace; font-size: 13px;">
+{layer9_html}
+</div>''' if layer9_html else ''}
+<h3 style="color: #f0c040;">📊 SOFR FUNDING STRESS (NY Fed Daily)</h3>
+<div style="background: #1a1a1a; padding: 15px; border-radius: 4px; white-space: pre-wrap; line-height: 1.6; font-family: monospace; font-size: 13px;">
+{layer8_html}
+</div>
 {f'''<h3 style="color: #f0c040;">🔬 Shadow Indicators (Test Mode)</h3>
 <div style="background: #1a1a1a; padding: 15px; border-radius: 4px; white-space: pre-wrap; line-height: 1.6; font-family: monospace; font-size: 13px;">
 {shadow_output}
 </div>''' if shadow_output else ''}
-<h3 style="color: #f0c040;">📊 IBKR Portfolio</h3>
-<div style="background: #1a1a1a; padding: 15px; border-radius: 4px; white-space: pre-wrap; line-height: 1.6; font-family: monospace; font-size: 13px;">
-{layer8_html}
-</div>
 <h3 style="color: #f0c040;">💎 Glint — Value Screen</h3>
 <div style="background: #1a1a1a; padding: 15px; border-radius: 4px; white-space: pre-wrap; line-height: 1.6; font-family: monospace; font-size: 13px;">
 {glint_html}
@@ -1514,6 +1546,173 @@ def get_layer8():
         return {"score": 0, "max": 5, "flags": [err_msg], "data": {}}
 
 
+def get_layer9():
+    """NFCI/ANFCI Weekly Systemic Risk Indicator (Chicago Fed).
+
+    NFCI: National Financial Conditions Index (105 indicators of systemic stress)
+    ANFCI: Adjusted NFCI (filters out economic noise to isolate institutional panic)
+
+    Both published by Chicago Fed, typically on Wednesdays.
+    Baseline = 0.00 (average conditions since 1971).
+
+    Thresholds:
+    - CALM: Index < -0.40 (loose conditions, low stress)
+    - CAUTION: Index -0.40 to 0.00 (tightening, rising stress)
+    - WARNING: Index > 0.00 (systemic distress, institutional panic)
+
+    Returns {score (0-5), max, flags, data with both NFCI and ANFCI}.
+    """
+    try:
+        fred_key = os.environ.get("FRED_API_KEY", "").strip()
+        if not fred_key:
+            return {"score": 0, "max": 5, "flags": ["NFCI: FRED_API_KEY not set"], "data": {}}
+
+        url = "https://api.stlouisfed.org/fred/series/observations"
+
+        # Fetch NFCI (National Financial Conditions Index)
+        params_nfci = {
+            "series_id": "NFCI",
+            "api_key": fred_key,
+            "file_type": "json",
+            "sort_order": "desc",
+            "limit": 1
+        }
+
+        # Fetch ANFCI (Adjusted NFCI - strips economic noise)
+        params_anfci = {
+            "series_id": "ANFCI",
+            "api_key": fred_key,
+            "file_type": "json",
+            "sort_order": "desc",
+            "limit": 1
+        }
+
+        r_nfci = requests.get(url, params=params_nfci, timeout=10)
+        r_anfci = requests.get(url, params=params_anfci, timeout=10)
+
+        nfci_fetch_ok = r_nfci.status_code == 200
+        anfci_fetch_ok = r_anfci.status_code == 200
+
+        nfci_value = None
+        anfci_value = None
+        nfci_date = None
+
+        # Parse NFCI (primary indicator)
+        if nfci_fetch_ok:
+            try:
+                for obs in r_nfci.json().get("observations", []):
+                    if obs["value"] != ".":
+                        nfci_value = float(obs["value"])
+                        nfci_date = obs.get("date", "")
+                        break
+            except Exception as e:
+                print(f"  ⚠️  NFCI parse error: {e}", flush=True)
+        else:
+            print(f"  ⚠️  NFCI fetch failed: {r_nfci.status_code}", flush=True)
+
+        # Parse ANFCI (optional - provides noise-filtered view)
+        if anfci_fetch_ok:
+            try:
+                for obs in r_anfci.json().get("observations", []):
+                    if obs["value"] != ".":
+                        anfci_value = float(obs["value"])
+                        break
+            except Exception as e:
+                print(f"  ⚠️  ANFCI parse error: {e}", flush=True)
+        else:
+            print(f"  ⚠️  ANFCI fetch failed: {r_anfci.status_code} (adjusted view unavailable)", flush=True)
+
+        if nfci_value is None:
+            return {"score": 0, "max": 5, "flags": ["NFCI: FRED data unavailable"], "data": {}}
+
+        # Score based on NFCI value (use primary NFCI, ANFCI is for reference)
+        score = 0
+        status = "CALM"
+        flags = []
+
+        if nfci_value >= 0.00:
+            # WARNING: Systemic distress
+            score = 5
+            status = "WARNING"
+            flags.append(f"NFCI at {nfci_value:.2f} — systemic financial distress signal (institutional panic)")
+        elif nfci_value >= -0.40:
+            # CAUTION: Tightening conditions
+            score = 2
+            status = "CAUTION"
+            flags.append(f"NFCI at {nfci_value:.2f} — financial conditions tightening (watch for escalation)")
+        else:
+            # CALM: Loose conditions
+            score = 0
+            status = "CALM"
+
+        date_str = nfci_date if nfci_date else datetime.datetime.utcnow().strftime("%Y-%m-%d")
+
+        return {
+            "score": score,
+            "max": 5,
+            "flags": flags,
+            "data": {
+                "nfci_value": nfci_value,
+                "anfci_value": anfci_value,
+                "nfci_date": date_str,
+                "nfci_status": status,
+                "nfci_spread": (nfci_value - anfci_value) if anfci_value is not None else None
+            }
+        }
+    except Exception as e:
+        err_msg = f"NFCI fetch error: {type(e).__name__}: {str(e)[:60]}"
+        print(f"  ⚠️  {err_msg}", flush=True)
+        return {"score": 0, "max": 5, "flags": [err_msg], "data": {}}
+
+
+def format_layer9_for_email(layer9_data):
+    """
+    Formats Layer 9 output into a clean text block for the email report.
+    Displays NFCI + ANFCI to detect broad systemic financial stress.
+    """
+    data = layer9_data.get("data", {})
+
+    if "nfci_value" not in data:
+        if layer9_data.get("flags"):
+            return f"📊 NFCI Systemic Risk: {layer9_data['flags'][0]}"
+        return "📊 NFCI Systemic Risk: unavailable"
+
+    nfci_val = data["nfci_value"]
+    anfci_val = data.get("anfci_value")
+    spread = data.get("nfci_spread")
+    date_str = data.get("nfci_date", "")
+    status = data.get("nfci_status", "UNKNOWN")
+
+    lines = ["📊 NFCI BROAD SYSTEMIC RISK — CHICAGO FED WEEKLY INDICATOR", ""]
+    lines.append(f"NFCI (all 105 indicators): {nfci_val:.2f}")
+    if anfci_val is not None:
+        lines.append(f"ANFCI (economic noise removed): {anfci_val:.2f}")
+        if spread is not None:
+            lines.append(f"Spread (NFCI - ANFCI): {spread:.2f}")
+    lines.append(f"Date: {date_str}")
+    lines.append("")
+
+    if status == "WARNING":
+        lines.append("Status: 🔴 WARNING — systemic financial distress, institutional panic detected")
+    elif status == "CAUTION":
+        lines.append("Status: 🟡 CAUTION — financial conditions tightening, monitor for escalation")
+    else:
+        lines.append("Status: 🟢 CALM — loose financial conditions, no systemic stress")
+
+    if layer9_data.get("flags"):
+        lines.append("")
+        for f in layer9_data["flags"]:
+            lines.append(f"⚡ {f}")
+
+    # Add context: show thresholds for transparency
+    lines.append("")
+    lines.append("Thresholds: CALM (NFCI<-0.40) | CAUTION (NFCI -0.40 to 0.00) | WARNING (NFCI>0.00)")
+    if anfci_val is not None:
+        lines.append("ANFCI filters economic growth/inflation noise — if ANFCI > NFCI, tightening is economic, not panic.")
+
+    return "\n".join(lines)
+
+
 def format_layer8_for_email(layer8_data):
     """
     Formats Layer 8 output into a clean text block for the email report.
@@ -1599,20 +1798,24 @@ def main():
     l3e = get_layer3e(spy_chain)
     print(f"  Score: {l3e['score']}/{l3e['max']} | Flags: {len(l3e['flags'])}", flush=True)
 
-    print("[Layer 8] TED spread (credit stress indicator)...", flush=True)
+    print("[Layer 8] SOFR funding stress (credit stress indicator)...", flush=True)
     l8 = get_layer8()
     print(f"  Score: {l8['score']}/{l8['max']} | Flags: {len(l8['flags'])}", flush=True)
 
+    print("[Layer 9] NFCI/ANFCI broad systemic risk (Chicago Fed weekly)...", flush=True)
+    l9 = get_layer9()
+    print(f"  Score: {l9['score']}/{l9['max']} | Flags: {len(l9['flags'])}", flush=True)
+
     print("[Self-Test] Running sanity checks...", flush=True)
-    sanity_warnings = run_sanity_checks(l1, l2, l3, l3b, l3c, l3d, l3e, l8)
+    sanity_warnings = run_sanity_checks(l1, l2, l3, l3b, l3c, l3d, l3e, l8, l9)
     if sanity_warnings:
         for w in sanity_warnings:
             print(f"  🚨 {w}", flush=True)
     else:
         print("  All checks passed.", flush=True)
 
-    print("[Layer 4] Computing composite score...")
-    score_data = compute_score(l1, l2, l3, l3b, l3c, l3d, l3e, l8)
+    print("[Composite Score] Computing aggregate stress...")
+    score_data = compute_score(l1, l2, l3, l3b, l3c, l3d, l3e, l8, l9)
     print(f"\n  {score_data['emoji']} SIGNAL: {score_data['signal']} ({score_data['score']}/{score_data['max']})")
     print(f"  {score_data['summary']}")
 
@@ -1632,10 +1835,10 @@ def main():
         print(f"  ⚠️  Glint screen failed, skipping section: {e}", flush=True)
         glint_html = "💎 Glint screen unavailable today."
 
-    all_flags = l1["flags"] + l2["flags"] + l3["flags"] + l3b["flags"] + l3d["flags"] + l3e["flags"] + l8["flags"]
+    all_flags = l1["flags"] + l2["flags"] + l3["flags"] + l3b["flags"] + l3d["flags"] + l3e["flags"] + l8["flags"] + l9["flags"]
     flags_text = "\n".join(all_flags) if all_flags else "No flags raised."
     raw_data = {**l1.get("data", {}), **l2.get("data", {}), **l3.get("data", {}),
-                **l3b.get("data", {}), **l3d.get("data", {}), **l3e.get("data", {}), **l8.get("data", {})}
+                **l3b.get("data", {}), **l3d.get("data", {}), **l3e.get("data", {}), **l8.get("data", {}), **l9.get("data", {})}
     data_text = json.dumps(raw_data, indent=2)
 
     run_full, mode_reason = should_run_full_research(score_data["signal"])
@@ -1715,13 +1918,17 @@ def main():
     else:
         shadow_output = "Shadow indicators module not loaded"
 
-    print("\n[Layer 8] Formatting TED spread for email...")
+    print("\n[Layer 9] Formatting NFCI/ANFCI for email...")
+    layer9_html = format_layer9_for_email(l9)
+    print(layer9_html)
+
+    print("\n[Layer 8] Formatting SOFR for email...")
     layer8_html = format_layer8_for_email(l8)
     print(layer8_html)
 
     print("\n[Data Quality] Building dashboard...")
-    quality_html, quality_pct = build_data_quality_dashboard(l1, l2, l3, l3b, l3c, l3d, l3e, l8)
-    print(f"  Data quality: {quality_pct}% ({sum(1 for l in [l1, l2, l3, l3b, l3c, l3d, l3e, l8] if l.get('data'))}/8 layers with data)")
+    quality_html, quality_pct = build_data_quality_dashboard(l1, l2, l3, l3b, l3c, l3d, l3e, l8, l9)
+    print(f"  Data quality: {quality_pct}% ({sum(1 for l in [l1, l2, l3, l3b, l3c, l3d, l3e, l8, l9] if l.get('data'))}/9 layers with data)")
 
     # Labeled inputs for Ark Protocol (not built yet): composite score,
     # the Boardroom's grounded market view, and its view on Glint's
@@ -1741,8 +1948,8 @@ def main():
     print(f"ARK_INPUTS_JSON: {json.dumps(ark_inputs)}", flush=True)
     publish_ark_handoff(ark_inputs, ARK_HANDOFF_GIST_ID, GITHUB_GIST_TOKEN)
 
-    print("\n[Layer 7] Sending email report...")
-    email_sent = send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html, glint_html, sanity_warnings, final_signal_data, glint_review, extra_flags=l3b["flags"] + l3d["flags"] + l3e["flags"], shadow_output=shadow_output, l3b=l3b, l3c=l3c, l3d=l3d, l3e=l3e, l8=l8, quality_html=quality_html)
+    print("\n[Email Report] Sending comprehensive analysis...")
+    email_sent = send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html, glint_html, sanity_warnings, final_signal_data, glint_review, extra_flags=l3b["flags"] + l3d["flags"] + l3e["flags"], shadow_output=shadow_output, l3b=l3b, l3c=l3c, l3d=l3d, l3e=l3e, l8=l8, l9=l9, layer9_html=layer9_html, quality_html=quality_html)
 
     if not email_sent:
         print("\n" + "=" * 60)
