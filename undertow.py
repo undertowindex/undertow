@@ -1547,7 +1547,7 @@ def get_layer8():
 
 
 def get_layer9():
-    """NFCI/ANFCI Weekly Systemic Risk Indicator (Chicago Fed).
+    """NFCI/ANFCI Weekly Systemic Risk Indicator (Chicago Fed) — DUAL-INDEX VALIDATION.
 
     NFCI: National Financial Conditions Index (105 indicators of systemic stress)
     ANFCI: Adjusted NFCI (filters out economic noise to isolate institutional panic)
@@ -1555,12 +1555,13 @@ def get_layer9():
     Both published by Chicago Fed, typically on Wednesdays.
     Baseline = 0.00 (average conditions since 1971).
 
-    Thresholds:
-    - CALM: Index < -0.40 (loose conditions, low stress)
-    - CAUTION: Index -0.40 to 0.00 (tightening, rising stress)
-    - WARNING: Index > 0.00 (systemic distress, institutional panic)
+    DUAL-INDEX FRAMEWORK (minimizes false alarms):
+    - CALM: Both NFCI and ANFCI firmly negative (< -0.40)
+    - CAUTION: Either index creeps toward 0.00, OR ANFCI accelerates faster than NFCI
+               (indicates pure institutional panic emerging)
+    - WARNING: Either index crosses >= 0.00 (confirmed systemic financial distress)
 
-    Returns {score (0-5), max, flags, data with both NFCI and ANFCI}.
+    Returns {score (0-5), max, flags, data with validation details}.
     """
     try:
         fred_key = os.environ.get("FRED_API_KEY", "").strip()
@@ -1569,22 +1570,22 @@ def get_layer9():
 
         url = "https://api.stlouisfed.org/fred/series/observations"
 
-        # Fetch NFCI (National Financial Conditions Index)
+        # Fetch NFCI — need 2 recent observations (current + prior week)
         params_nfci = {
             "series_id": "NFCI",
             "api_key": fred_key,
             "file_type": "json",
             "sort_order": "desc",
-            "limit": 1
+            "limit": 2
         }
 
-        # Fetch ANFCI (Adjusted NFCI - strips economic noise)
+        # Fetch ANFCI — need 2 recent observations for divergence detection
         params_anfci = {
             "series_id": "ANFCI",
             "api_key": fred_key,
             "file_type": "json",
             "sort_order": "desc",
-            "limit": 1
+            "limit": 2
         }
 
         r_nfci = requests.get(url, params=params_nfci, timeout=10)
@@ -1593,57 +1594,101 @@ def get_layer9():
         nfci_fetch_ok = r_nfci.status_code == 200
         anfci_fetch_ok = r_anfci.status_code == 200
 
-        nfci_value = None
-        anfci_value = None
-        nfci_date = None
-
-        # Parse NFCI (primary indicator)
+        # Parse NFCI current and prior
+        nfci_observations = []
         if nfci_fetch_ok:
             try:
                 for obs in r_nfci.json().get("observations", []):
                     if obs["value"] != ".":
-                        nfci_value = float(obs["value"])
-                        nfci_date = obs.get("date", "")
-                        break
+                        nfci_observations.append({
+                            "value": float(obs["value"]),
+                            "date": obs.get("date", "")
+                        })
+                if len(nfci_observations) < 1:
+                    return {"score": 0, "max": 5, "flags": ["NFCI: No valid FRED observations"], "data": {}}
             except Exception as e:
                 print(f"  ⚠️  NFCI parse error: {e}", flush=True)
+                return {"score": 0, "max": 5, "flags": [f"NFCI parse error: {e}"], "data": {}}
         else:
             print(f"  ⚠️  NFCI fetch failed: {r_nfci.status_code}", flush=True)
+            return {"score": 0, "max": 5, "flags": [f"NFCI fetch failed: {r_nfci.status_code}"], "data": {}}
 
-        # Parse ANFCI (optional - provides noise-filtered view)
+        # Parse ANFCI current and prior
+        anfci_observations = []
         if anfci_fetch_ok:
             try:
                 for obs in r_anfci.json().get("observations", []):
                     if obs["value"] != ".":
-                        anfci_value = float(obs["value"])
-                        break
+                        anfci_observations.append({
+                            "value": float(obs["value"]),
+                            "date": obs.get("date", "")
+                        })
             except Exception as e:
                 print(f"  ⚠️  ANFCI parse error: {e}", flush=True)
+                # ANFCI fetch failure is recoverable — use NFCI only
+                anfci_observations = []
         else:
-            print(f"  ⚠️  ANFCI fetch failed: {r_anfci.status_code} (adjusted view unavailable)", flush=True)
+            print(f"  ⚠️  ANFCI fetch failed: {r_anfci.status_code}", flush=True)
+            # ANFCI is optional for scoring but helps divergence detection
 
-        if nfci_value is None:
-            return {"score": 0, "max": 5, "flags": ["NFCI: FRED data unavailable"], "data": {}}
+        # Extract current values
+        nfci_value = nfci_observations[0]["value"]
+        nfci_date = nfci_observations[0]["date"]
+        nfci_prior = nfci_observations[1]["value"] if len(nfci_observations) > 1 else None
+        nfci_momentum = (nfci_value - nfci_prior) if nfci_prior is not None else 0
 
-        # Score based on NFCI value (use primary NFCI, ANFCI is for reference)
+        anfci_value = anfci_observations[0]["value"] if anfci_observations else None
+        anfci_prior = anfci_observations[1]["value"] if len(anfci_observations) > 1 else None
+        anfci_momentum = (anfci_value - anfci_prior) if (anfci_value is not None and anfci_prior is not None) else None
+
+        # Calculate spread: positive spread (NFCI > ANFCI) means economic/policy tightening
+        #                  negative spread (ANFCI > NFCI) means pure institutional panic
+        nfci_spread = (nfci_value - anfci_value) if anfci_value is not None else None
+
+        # ────────────────────────────────────────────────────
+        # DUAL-INDEX SCORING LOGIC
+        # ────────────────────────────────────────────────────
         score = 0
         status = "CALM"
         flags = []
 
-        if nfci_value >= 0.00:
-            # WARNING: Systemic distress
+        # Check divergence: if ANFCI > NFCI, pure panic is visible
+        anfci_divergence = False
+        if anfci_value is not None and nfci_spread is not None and nfci_spread < -0.05:
+            anfci_divergence = True
+            flags.append(f"⚡ ANFCI divergence detected (ANFCI > NFCI by {abs(nfci_spread):.2f}) — institutional panic signal")
+
+        # Check ANFCI acceleration: if ANFCI rising faster than NFCI
+        anfci_accelerating = False
+        if anfci_momentum is not None and nfci_momentum is not None and anfci_momentum > nfci_momentum + 0.10:
+            anfci_accelerating = True
+            flags.append(f"⚡ ANFCI accelerating ({anfci_momentum:+.2f}) faster than NFCI ({nfci_momentum:+.2f}) — pure stress building")
+
+        # WARNING: Either index >= 0.00
+        if nfci_value >= 0.00 or (anfci_value is not None and anfci_value >= 0.00):
             score = 5
             status = "WARNING"
-            flags.append(f"NFCI at {nfci_value:.2f} — systemic financial distress signal (institutional panic)")
-        elif nfci_value >= -0.40:
-            # CAUTION: Tightening conditions
+            if nfci_value >= 0.00:
+                flags.append(f"NFCI {nfci_value:+.2f} — systemic financial distress (institutional panic confirmed)")
+            if anfci_value is not None and anfci_value >= 0.00:
+                flags.append(f"ANFCI {anfci_value:+.2f} — pure institutional stress confirmed")
+
+        # CAUTION: Either index -0.40 to <0.00, OR divergence/acceleration detected
+        elif (nfci_value >= -0.40 or (anfci_value is not None and anfci_value >= -0.40)
+              or anfci_divergence or anfci_accelerating):
             score = 2
             status = "CAUTION"
-            flags.append(f"NFCI at {nfci_value:.2f} — financial conditions tightening (watch for escalation)")
+            if nfci_value >= -0.40 and nfci_value < 0:
+                flags.append(f"NFCI {nfci_value:+.2f} — financial conditions tightening toward distress")
+            if anfci_value is not None and anfci_value >= -0.40 and anfci_value < 0:
+                flags.append(f"ANFCI {anfci_value:+.2f} — noise-filtered stress building")
+
+        # CALM: Both indices firmly < -0.40 with no divergence
         else:
-            # CALM: Loose conditions
             score = 0
             status = "CALM"
+            if nfci_value < -0.40 and (anfci_value is None or anfci_value < -0.40):
+                flags.append(f"Both indices firmly negative (NFCI {nfci_value:.2f}, ANFCI {anfci_value:.2f if anfci_value else 'N/A'}) — healthy financial conditions")
 
         date_str = nfci_date if nfci_date else datetime.datetime.utcnow().strftime("%Y-%m-%d")
 
@@ -1652,11 +1697,17 @@ def get_layer9():
             "max": 5,
             "flags": flags,
             "data": {
-                "nfci_value": nfci_value,
-                "anfci_value": anfci_value,
+                "nfci_value": round(nfci_value, 2),
+                "nfci_prior": round(nfci_prior, 2) if nfci_prior is not None else None,
+                "nfci_momentum": round(nfci_momentum, 2),
+                "anfci_value": round(anfci_value, 2) if anfci_value is not None else None,
+                "anfci_prior": round(anfci_prior, 2) if anfci_prior is not None else None,
+                "anfci_momentum": round(anfci_momentum, 2) if anfci_momentum is not None else None,
+                "nfci_spread": round(nfci_spread, 2) if nfci_spread is not None else None,
+                "anfci_divergence": anfci_divergence,
+                "anfci_accelerating": anfci_accelerating,
                 "nfci_date": date_str,
-                "nfci_status": status,
-                "nfci_spread": (nfci_value - anfci_value) if anfci_value is not None else None
+                "nfci_status": status
             }
         }
     except Exception as e:
@@ -1668,7 +1719,7 @@ def get_layer9():
 def format_layer9_for_email(layer9_data):
     """
     Formats Layer 9 output into a clean text block for the email report.
-    Displays NFCI + ANFCI to detect broad systemic financial stress.
+    Displays NFCI + ANFCI dual-index validation with divergence & momentum detection.
     """
     data = layer9_data.get("data", {})
 
@@ -1677,38 +1728,57 @@ def format_layer9_for_email(layer9_data):
             return f"📊 NFCI Systemic Risk: {layer9_data['flags'][0]}"
         return "📊 NFCI Systemic Risk: unavailable"
 
-    nfci_val = data["nfci_value"]
+    nfci_val = data.get("nfci_value")
+    nfci_momentum = data.get("nfci_momentum", 0)
     anfci_val = data.get("anfci_value")
+    anfci_momentum = data.get("anfci_momentum")
     spread = data.get("nfci_spread")
+    divergence = data.get("anfci_divergence", False)
+    accelerating = data.get("anfci_accelerating", False)
     date_str = data.get("nfci_date", "")
     status = data.get("nfci_status", "UNKNOWN")
 
-    lines = ["📊 NFCI BROAD SYSTEMIC RISK — CHICAGO FED WEEKLY INDICATOR", ""]
-    lines.append(f"NFCI (all 105 indicators): {nfci_val:.2f}")
+    lines = ["📊 NFCI BROAD SYSTEMIC RISK — CHICAGO FED WEEKLY INDICATOR (DUAL-INDEX)", ""]
+
+    # Index values with momentum
+    lines.append(f"NFCI (105 indicators): {nfci_val:+.2f} (momentum: {nfci_momentum:+.2f})")
     if anfci_val is not None:
-        lines.append(f"ANFCI (economic noise removed): {anfci_val:.2f}")
+        lines.append(f"ANFCI (noise-filtered):  {anfci_val:+.2f} (momentum: {anfci_momentum:+.2f if anfci_momentum is not None else 'N/A'})")
         if spread is not None:
-            lines.append(f"Spread (NFCI - ANFCI): {spread:.2f}")
+            spread_interpretation = "panic" if spread < -0.05 else "economic/policy" if spread > 0.05 else "balanced"
+            lines.append(f"Spread (NFCI-ANFCI): {spread:+.2f} ({spread_interpretation} tightening)")
     lines.append(f"Date: {date_str}")
     lines.append("")
 
+    # Status and validation signals
     if status == "WARNING":
-        lines.append("Status: 🔴 WARNING — systemic financial distress, institutional panic detected")
+        lines.append("Status: 🔴 WARNING — systemic financial distress confirmed by dual-index")
     elif status == "CAUTION":
-        lines.append("Status: 🟡 CAUTION — financial conditions tightening, monitor for escalation")
+        lines.append("Status: 🟡 CAUTION — stress signal detected, monitor for escalation")
     else:
-        lines.append("Status: 🟢 CALM — loose financial conditions, no systemic stress")
+        lines.append("Status: 🟢 CALM — healthy financial conditions across all indices")
 
+    # Validation details
+    if divergence or accelerating:
+        lines.append("")
+        lines.append("Validation Signals:")
+        if divergence:
+            lines.append(f"  ⚡ DIVERGENCE: ANFCI > NFCI → pure institutional panic is visible")
+        if accelerating:
+            lines.append(f"  ⚡ ACCELERATION: ANFCI rising faster than NFCI → stress building")
+
+    # Flags from analysis
     if layer9_data.get("flags"):
         lines.append("")
         for f in layer9_data["flags"]:
-            lines.append(f"⚡ {f}")
+            lines.append(f"  ⚡ {f}")
 
-    # Add context: show thresholds for transparency
+    # Framework explanation
     lines.append("")
-    lines.append("Thresholds: CALM (NFCI<-0.40) | CAUTION (NFCI -0.40 to 0.00) | WARNING (NFCI>0.00)")
-    if anfci_val is not None:
-        lines.append("ANFCI filters economic growth/inflation noise — if ANFCI > NFCI, tightening is economic, not panic.")
+    lines.append("Framework (minimizes false alarms):")
+    lines.append("  • CALM: Both indices < -0.40 (loose financial conditions)")
+    lines.append("  • CAUTION: Either index -0.40 to 0.00, OR divergence/acceleration detected")
+    lines.append("  • WARNING: Either index ≥ 0.00 (confirmed systemic stress)")
 
     return "\n".join(lines)
 
