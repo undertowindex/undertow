@@ -1,11 +1,10 @@
-"""Four new leading indicators for Undertow shadow mode (test period Sep 26 - Oct 23).
-Run in parallel to primary 7-layer score; do NOT change RED/AMBER/GREEN signal until validated.
+"""Three new leading indicators for Undertow shadow mode (test period Sep 26 - Oct 23).
+Run in parallel to primary layered score; do NOT change RED/AMBER/GREEN signal until validated.
 
 These are designed to show early warning signals 2–5 days before major repricing:
 1. Market Breadth — early rollover signal
 2. VIX Term Structure — contango/backwardation flip
-3. TED Spread — credit event warning
-4. QQQ Put/Call Ratio — tech-sector institutional hedging
+3. QQQ Put/Call Ratio — tech-sector institutional hedging
 """
 
 import os
@@ -107,75 +106,6 @@ def fetch_vix_term_structure():
         return None, f"Error: {type(e).__name__}"
 
 
-def fetch_ted_spread():
-    """TED Spread: 3-month SOFR minus fed funds rate (basis points).
-
-    Signal: widens 48-72 hours before credit events.
-    Data source: FRED API (requires FRED_API_KEY in environment).
-    """
-    try:
-        fred_key = os.environ.get("FRED_API_KEY", "").strip()
-
-        if not fred_key:
-            return None, "FRED_API_KEY not set"
-
-        # Fetch SOFR 3M and Fed Funds from FRED with retries
-        url_sofr = "https://api.stlouisfed.org/fred/series/observations"
-        url_ff = "https://api.stlouisfed.org/fred/series/observations"
-
-        params_sofr = {
-            "series_id": "SOFR3M",
-            "api_key": fred_key,
-            "file_type": "json",
-            "sort_order": "desc",
-            "limit": 1
-        }
-        params_ff = {
-            "series_id": "FEDFUNDS",
-            "api_key": fred_key,
-            "file_type": "json",
-            "sort_order": "desc",
-            "limit": 1
-        }
-
-        r_sofr = requests.get(url_sofr, params=params_sofr, timeout=10)
-        r_ff = requests.get(url_ff, params=params_ff, timeout=10)
-
-        r_sofr.raise_for_status()
-        r_ff.raise_for_status()
-
-        sofr_val = None
-        ff_val = None
-
-        for obs in r_sofr.json().get("observations", []):
-            if obs["value"] != ".":
-                sofr_val = float(obs["value"])
-                break
-
-        for obs in r_ff.json().get("observations", []):
-            if obs["value"] != ".":
-                ff_val = float(obs["value"])
-                break
-
-        if sofr_val is None or ff_val is None:
-            return None, "FRED data missing"
-
-        ted = sofr_val - ff_val
-
-        # Status thresholds (basis points)
-        if ted < 50:
-            status = "NORMAL"
-        elif ted < 80:
-            status = "CAUTION"
-        else:
-            status = "ALERT"
-
-        return round(ted, 1), status
-    except Exception as e:
-        print(f"  ⚠️  TED spread fetch error: {type(e).__name__}: {str(e)[:60]}", flush=True)
-        return None, f"Error: {type(e).__name__}"
-
-
 def fetch_qqq_put_call_ratio():
     """QQQ Put/Call Ratio: institutional hedging on tech sector.
 
@@ -208,13 +138,12 @@ def fetch_qqq_put_call_ratio():
         return None, f"Error: {type(e).__name__}"
 
 
-def calculate_shadow_score(breadth, vix_term, ted, qqq_ratio):
-    """Combine four indicators into a 0-35 shadow score.
+def calculate_shadow_score(breadth, vix_term, qqq_ratio):
+    """Combine three indicators into a 0-35 shadow score.
 
     Each indicator contributes stress points:
     - Breadth: 100% = 0 stress, 0% = 10 stress
     - VIX term: 1.0 = 0 stress, 1.1+ = 10 stress
-    - TED: 0 bps = 0 stress, 100 bps = 10 stress
     - QQQ ratio: 1.0 = 0 stress, 1.3+ = 10 stress
     """
     score = 0
@@ -230,12 +159,6 @@ def calculate_shadow_score(breadth, vix_term, ted, qqq_ratio):
         # Higher ratio = more stress
         term_stress = max(0, min(10, 100 * (vix_term - 1.0)))
         score += term_stress
-        count += 1
-
-    if ted is not None:
-        # Higher TED = more stress
-        ted_stress = max(0, min(10, ted / 10))
-        score += ted_stress
         count += 1
 
     if qqq_ratio is not None:
@@ -268,19 +191,13 @@ if __name__ == "__main__":
     else:
         print(f"✗ VIX Term Ratio: {vix_status}")
 
-    ted, ted_status = fetch_ted_spread()
-    if ted is not None:
-        print(f"✓ TED Spread: {ted}bps [{ted_status}]")
-    else:
-        print(f"✗ TED Spread: {ted_status}")
-
     qqq_ratio, qqq_status = fetch_qqq_put_call_ratio()
     if qqq_ratio is not None:
         print(f"✓ QQQ Put/Call: {qqq_ratio} [{qqq_status}]")
     else:
         print(f"✗ QQQ Put/Call: {qqq_status}")
 
-    shadow = calculate_shadow_score(breadth, vix_term, ted, qqq_ratio)
+    shadow = calculate_shadow_score(breadth, vix_term, qqq_ratio)
     if shadow is not None:
         print(f"\nShadow Score: {shadow}/35")
     else:

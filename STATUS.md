@@ -25,7 +25,7 @@ Set on Railway (and in `~/undertow/.env.local`, gitignored, for local manual run
 - `ANTHROPIC_API_KEY` — powers the Boardroom LLM calls
 - `RESEND_API_KEY` — email sending (see caveat below)
 - `GITHUB_GIST_TOKEN` + `ARK_HANDOFF_GIST_ID` — the Undertow→Ark signal handoff (Ark only)
-- `IBKR_TOKEN` / `IBKR_QUERY_ID` — optional, not currently set; without them Layer 8 (your live IBKR portfolio) just reports "unavailable," doesn't break anything
+- `IBKR_TOKEN` / `IBKR_QUERY_ID` — optional, not currently set; without them the IBKR portfolio layer is not currently active
 
 ## Known issues fixed 2026-08-24 to 2026-08-26
 

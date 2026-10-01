@@ -16,7 +16,7 @@ from boardroom_research import (
 try:
     from undertow_new_indicators import (
         fetch_breadth_indicator, fetch_vix_term_structure,
-        fetch_ted_spread, fetch_qqq_put_call_ratio,
+        fetch_qqq_put_call_ratio,
         calculate_shadow_score
     )
     SHADOW_INDICATORS_AVAILABLE = True
@@ -461,7 +461,6 @@ def get_layer3b():
         sofr, sofr_date = fred_get("SOFR")
         dff, dff_date = fred_get("DFF")
         rrp, rrp_date = fred_get("RRPONTSYD")
-        dgs3mo, dgs3mo_date = fred_get("DGS3MO")
 
         if sofr is not None and dff is not None:
             spread = sofr - dff
@@ -480,16 +479,8 @@ def get_layer3b():
             if rrp > 100:
                 score += 1
                 flags.append(f"Reverse repo usage spiking (${rrp:.0f}B)")
-
-        if sofr is not None and dgs3mo is not None:
-            ted = dgs3mo - sofr
-            data["ted_spread_equiv"] = round(ted, 3)
-            data["ted_spread_date"] = min(sofr_date, dgs3mo_date)
-            if ted < -0.15:
-                score += 1
-                flags.append(f"TED-equivalent spread inverted ({ted:.2f}pp) - funding stress")
     except Exception as e:
-        flags.append(f"Layer 3b repo/TED error: {e}")
+        flags.append(f"Layer 3b repo error: {e}")
 
     return {"score": score, "max": 4, "flags": flags, "data": data}
 
@@ -509,7 +500,7 @@ def _check_freshness(warnings, label, date_str, max_age_days=5):
         warnings.append(f"{label} sanity: date {date_str!r} not parseable")
 
 
-def run_sanity_checks(l1, l2, l3, l3b, l3c, l3d, l3e, l8):
+def run_sanity_checks(l1, l2, l3, l3b, l3c, l3d, l3e):
     warnings = []
 
     vix = l1["data"].get("vix")
@@ -550,9 +541,6 @@ def run_sanity_checks(l1, l2, l3, l3b, l3c, l3d, l3e, l8):
     rrp = l3b["data"].get("reverse_repo_bn")
     if rrp is not None and rrp < 0:
         warnings.append(f"Layer 3b sanity: reverse repo {rrp} is negative")
-    ted = l3b["data"].get("ted_spread_equiv")
-    if ted is not None and not (-2 <= ted <= 2):
-        warnings.append(f"Layer 3b sanity: TED-equivalent spread {ted} outside plausible range (-2pp to 2pp)")
 
     # Freshness checks across every layer that carries a date - daily
     # market/FRED data gets 5 days' tolerance (covers weekends plus a
@@ -564,9 +552,7 @@ def run_sanity_checks(l1, l2, l3, l3b, l3c, l3d, l3e, l8):
     _check_freshness(warnings, "Layer 3b (COT)", l3b["data"].get("cot_report_date"), max_age_days=10)
     _check_freshness(warnings, "Layer 3b (SOFR-DFF)", l3b["data"].get("sofr_dff_date"), max_age_days=5)
     _check_freshness(warnings, "Layer 3b (reverse repo)", l3b["data"].get("reverse_repo_date"), max_age_days=5)
-    _check_freshness(warnings, "Layer 3b (TED-equiv)", l3b["data"].get("ted_spread_date"), max_age_days=5)
     _check_freshness(warnings, "Layer 3d (SKEW)", l3d["data"].get("last_bar_date"), max_age_days=5)
-    _check_freshness(warnings, "Layer 8 (TED spread)", l8["data"].get("ted_spread_date"), max_age_days=5)
 
     pcr = l3c["data"].get("put_call_ratio")
     if pcr is not None and not (0.1 <= pcr <= 5):
@@ -581,11 +567,7 @@ def run_sanity_checks(l1, l2, l3, l3b, l3c, l3d, l3e, l8):
         warnings.append(f"Layer 3e sanity: net GEX {gex_bn}bn per 1% outside plausible range (-100 to 100)")
     _check_freshness(warnings, "Layer 3e (GEX)", l3e["data"].get("last_bar_date"), max_age_days=5)
 
-    ted_bps = l8["data"].get("ted_spread_bps")
-    if ted_bps is not None and not (0 <= ted_bps <= 200):
-        warnings.append(f"Layer 8 sanity: TED spread {ted_bps}bps outside plausible range (0-200)")
-
-    for label, layer in [("Layer 1", l1), ("Layer 2", l2), ("Layer 3", l3), ("Layer 3b", l3b), ("Layer 3c", l3c), ("Layer 3d", l3d), ("Layer 3e", l3e), ("Layer 8", l8)]:
+    for label, layer in [("Layer 1", l1), ("Layer 2", l2), ("Layer 3", l3), ("Layer 3b", l3b), ("Layer 3c", l3c), ("Layer 3d", l3d), ("Layer 3e", l3e)]:
         if not (0 <= layer["score"] <= layer["max"]):
             warnings.append(f"{label} sanity: score {layer['score']} outside valid range 0-{layer['max']}")
         # A layer that produced zero data almost always means its fetch hit
@@ -825,16 +807,17 @@ def get_layer3e(chain=None):
 
     return {"score": score, "max": 2, "flags": flags, "data": data}
 
-def compute_score(l1, l2, l3, l3b, l3c, l3d, l3e, l8):
-    # 2026-09-27: Added Layer 8 TED spread (+5 max). New max = 36.
-    # Scaled thresholds from old (max=31): 10/31*36 ≈ 12, 19/31*36 ≈ 22.
-    total = l1["score"] + l2["score"] + l3["score"] + l3b["score"] + l3c["score"] + l3d["score"] + l3e["score"] + l8["score"]
+def compute_score(l1, l2, l3, l3b, l3c, l3d, l3e):
+    # 2026-10-01: Removed the obsolete LIBOR-era credit-spread layer;
+    # funding stress is covered by the SOFR-based checks in Layer 3b).
+    # Max back to 31, thresholds back to GREEN <=10, AMBER <=19, RED >=20.
+    total = l1["score"] + l2["score"] + l3["score"] + l3b["score"] + l3c["score"] + l3d["score"] + l3e["score"]
 
-    if total <= 12:
+    if total <= 10:
         signal = "GREEN"
         emoji = "🟢"
         summary = "Markets calm. No significant stress signals detected."
-    elif total <= 21:
+    elif total <= 19:
         signal = "AMBER"
         emoji = "🟡"
         summary = "Elevated risk. Multiple stress signals present. Watch closely."
@@ -843,7 +826,7 @@ def compute_score(l1, l2, l3, l3b, l3c, l3d, l3e, l8):
         emoji = "🔴"
         summary = "High alert. Significant macro stress across multiple indicators."
 
-    return {"score": total, "max": 36, "signal": signal, "emoji": emoji, "summary": summary}
+    return {"score": total, "max": 31, "signal": signal, "emoji": emoji, "summary": summary}
 
 # ─────────────────────────────────────────────
 # LAYER 5: THE BOARDROOM
@@ -891,13 +874,13 @@ def call_anthropic_text(payload, timeout, label):
     raise RuntimeError(f"API unreachable after retries ({last_error})")
 
 
-def run_boardroom(score_data, l1, l2, l3, l8):
+def run_boardroom(score_data, l1, l2, l3):
     if not ANTHROPIC_API_KEY:
         return "Boardroom unavailable — no API key."
 
-    all_flags = l1["flags"] + l2["flags"] + l3["flags"] + l8["flags"]
+    all_flags = l1["flags"] + l2["flags"] + l3["flags"]
     flags_text = "\n".join(all_flags) if all_flags else "No flags raised."
-    raw_data = {**l1.get("data", {}), **l2.get("data", {}), **l3.get("data", {}), **l8.get("data", {})}
+    raw_data = {**l1.get("data", {}), **l2.get("data", {}), **l3.get("data", {})}
     data_text = json.dumps(raw_data, indent=2)
 
     board_today = datetime.date.today().strftime("%A %d %B %Y")
@@ -1035,7 +1018,7 @@ def apply_boardroom_override(score_data, tally):
 # ─────────────────────────────────────────────
 # LAYER 6: TRADE IDEAS
 # ─────────────────────────────────────────────
-def get_trade_ideas(score_data, l1, l2, l3, l8, effective_signal=None):
+def get_trade_ideas(score_data, l1, l2, l3, effective_signal=None):
     if not ANTHROPIC_API_KEY:
         return "Trade ideas unavailable — no API key."
 
@@ -1044,7 +1027,7 @@ def get_trade_ideas(score_data, l1, l2, l3, l8, effective_signal=None):
     # rather than the pre-Boardroom composite signal alone.
     signal = effective_signal or score_data["signal"]
     score = score_data["score"]
-    all_flags = l1["flags"] + l2["flags"] + l3["flags"] + l8["flags"]
+    all_flags = l1["flags"] + l2["flags"] + l3["flags"]
     flags_text = "\n".join(all_flags) if all_flags else "No flags."
 
     today_str = datetime.date.today().strftime("%A %d %B %Y")
@@ -1088,8 +1071,8 @@ Be specific. No waffle."""
 # ─────────────────────────────────────────────
 # LAYER 7: EMAIL via RESEND
 # ─────────────────────────────────────────────
-def generate_dials_dashboard(score_data, l1, l2, l3, l3b, l3c, l3d, l3e, l8):
-    """Generate HTML dashboard showing 8 indicator dials (GREEN/AMBER/RED gauges).
+def generate_dials_dashboard(score_data, l1, l2, l3, l3b, l3c, l3d, l3e):
+    """Generate HTML dashboard showing 7 indicator dials (GREEN/AMBER/RED gauges).
 
     Each dial shows: layer name, score/max, and colored gauge.
     Stress threshold: ≤30% green, ≤60% amber, >60% red.
@@ -1103,7 +1086,6 @@ def generate_dials_dashboard(score_data, l1, l2, l3, l3b, l3c, l3d, l3e, l8):
         ("Put/Call Ratio", l3c),
         ("SKEW Index", l3d),
         ("Dealer Gamma", l3e),
-        ("TED Spread", l8),
     ]
 
     dials_html = f"""
@@ -1180,7 +1162,7 @@ def generate_dials_dashboard(score_data, l1, l2, l3, l3b, l3c, l3d, l3e, l8):
     return dials_html
 
 
-def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", glint_html="", sanity_warnings=None, final_signal_data=None, glint_review="", extra_flags=None, shadow_output="", l3b=None, l3c=None, l3d=None, l3e=None, l8=None):
+def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, glint_html="", sanity_warnings=None, final_signal_data=None, glint_review="", extra_flags=None, shadow_output="", l3b=None, l3c=None, l3d=None, l3e=None):
     """Returns True only on a confirmed 200 from Resend. This is an
     early-warning system - a report that silently failed to send on the
     one day it mattered is worse than no report at all, so callers must
@@ -1246,9 +1228,9 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", g
 
     # Generate dials dashboard if layer data is provided
     dials_html = ""
-    if l3b and l3c and l3d and l3e and l8:
+    if l3b and l3c and l3d and l3e:
         try:
-            dials_html = generate_dials_dashboard(score_data, l1, l2, l3, l3b, l3c, l3d, l3e, l8)
+            dials_html = generate_dials_dashboard(score_data, l1, l2, l3, l3b, l3c, l3d, l3e)
         except Exception as e:
             print(f"  ⚠️  Dials generation failed: {e}", flush=True)
 
@@ -1282,10 +1264,6 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", g
 <div style="background: #1a1a1a; padding: 15px; border-radius: 4px; white-space: pre-wrap; line-height: 1.6; font-family: monospace; font-size: 13px;">
 {shadow_output}
 </div>''' if shadow_output else ''}
-<h3 style="color: #f0c040;">📊 IBKR Portfolio</h3>
-<div style="background: #1a1a1a; padding: 15px; border-radius: 4px; white-space: pre-wrap; line-height: 1.6; font-family: monospace; font-size: 13px;">
-{layer8_html}
-</div>
 <h3 style="color: #f0c040;">💎 Glint — Value Screen</h3>
 <div style="background: #1a1a1a; padding: 15px; border-radius: 4px; white-space: pre-wrap; line-height: 1.6; font-family: monospace; font-size: 13px;">
 {glint_html}
@@ -1327,135 +1305,6 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", g
 # ─────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────
-# ─────────────────────────────────────────────
-# LAYER 8: TED SPREAD (CREDIT STRESS INDICATOR)
-# ─────────────────────────────────────────────
-
-def get_layer8():
-    """TED Spread: SOFR 3M minus Fed Funds rate (basis points).
-
-    Widens 48-72 hours before credit events. Uses FRED API.
-    Signal: <50bps=calm, 50-80=caution, >80=stress.
-    Returns {score (0-5), max, flags, data}.
-    """
-    try:
-        fred_key = os.environ.get("FRED_API_KEY", "").strip()
-        if not fred_key:
-            return {"score": 0, "max": 5, "flags": ["TED spread: FRED_API_KEY not set"], "data": {}}
-
-        # Fetch 3-Month Treasury Bill Rate and Fed Funds Rate from FRED
-        # TED Spread = (3M SOFR or T-Bill) - (Fed Funds), measures credit stress
-        # Using DGS3MO (3-Month Treasury Bill) as proxy for short-term funding cost
-        url_sofr = "https://api.stlouisfed.org/fred/series/observations"
-        url_ff = "https://api.stlouisfed.org/fred/series/observations"
-
-        params_sofr = {
-            "series_id": "DGS3MO",  # 3-Month Treasury Bill Rate (SOFR3M not available in FRED)
-            "api_key": fred_key,
-            "file_type": "json",
-            "sort_order": "desc",
-            "limit": 1
-        }
-        params_ff = {
-            "series_id": "FEDFUNDS",
-            "api_key": fred_key,
-            "file_type": "json",
-            "sort_order": "desc",
-            "limit": 1
-        }
-
-        r_sofr = requests.get(url_sofr, params=params_sofr, timeout=10)
-        r_ff = requests.get(url_ff, params=params_ff, timeout=10)
-
-        r_sofr.raise_for_status()
-        r_ff.raise_for_status()
-
-        tbill_val = None
-        ff_val = None
-
-        for obs in r_sofr.json().get("observations", []):
-            if obs["value"] != ".":
-                tbill_val = float(obs["value"])
-                break
-
-        for obs in r_ff.json().get("observations", []):
-            if obs["value"] != ".":
-                ff_val = float(obs["value"])
-                break
-
-        if tbill_val is None or ff_val is None:
-            return {"score": 0, "max": 5, "flags": ["TED spread: FRED data missing"], "data": {}}
-
-        # TED Spread = 3M T-Bill Rate - Fed Funds Rate
-        ted = tbill_val - ff_val
-
-        # Score thresholds (basis points)
-        if ted < 50:
-            score = 0
-            status = "NORMAL"
-        elif ted < 80:
-            score = 2
-            status = "CAUTION"
-        else:
-            score = 5
-            status = "STRESS"
-
-        flags = [f"TED spread elevated: {ted:.1f}bps [{status}]"] if score > 0 else []
-        date_str = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-
-        return {
-            "score": score,
-            "max": 5,
-            "flags": flags,
-            "data": {
-                "ted_spread_bps": ted,
-                "tbill_3m": tbill_val,
-                "fed_funds": ff_val,
-                "ted_spread_date": date_str
-            }
-        }
-    except Exception as e:
-        err_msg = f"TED spread fetch error: {type(e).__name__}: {str(e)[:60]}"
-        print(f"  ⚠️  {err_msg}", flush=True)
-        return {"score": 0, "max": 5, "flags": [err_msg], "data": {}}
-
-
-def format_layer8_for_email(layer8_data):
-    """
-    Formats Layer 8 output into a clean text block for the email report.
-    """
-    if "ted_spread_bps" not in layer8_data.get("data", {}):
-        if layer8_data.get("flags"):
-            return f"📊 TED Spread: {layer8_data['flags'][0]}"
-        return "📊 TED Spread: unavailable"
-
-    ted = layer8_data["data"]["ted_spread_bps"]
-    tbill = layer8_data["data"]["tbill_3m"]
-    ff = layer8_data["data"]["fed_funds"]
-    date_str = layer8_data["data"].get("ted_spread_date", "")
-
-    lines = ["📊 TED SPREAD — CREDIT STRESS INDICATOR", ""]
-    lines.append(f"TED Spread: {ted:.1f} basis points")
-    lines.append(f"3M T-Bill: {tbill:.3f}%")
-    lines.append(f"Fed Funds: {ff:.3f}%")
-    lines.append(f"Date: {date_str}")
-    lines.append("")
-
-    if ted < 50:
-        lines.append("Status: NORMAL — no credit stress detected")
-    elif ted < 80:
-        lines.append("Status: CAUTION — elevated credit spreads, monitor for widening")
-    else:
-        lines.append("Status: STRESS — significant credit stress signal")
-
-    if layer8_data.get("flags"):
-        lines.append("")
-        for f in layer8_data["flags"]:
-            lines.append(f"⚡ {f}")
-
-    return "\n".join(lines)
-
-
 def main():
     print("=" * 60)
     print("UNDERTOW INDEX — RUNNING")
@@ -1496,12 +1345,8 @@ def main():
     l3e = get_layer3e(spy_chain)
     print(f"  Score: {l3e['score']}/{l3e['max']} | Flags: {len(l3e['flags'])}", flush=True)
 
-    print("[Layer 8] TED spread (credit stress indicator)...", flush=True)
-    l8 = get_layer8()
-    print(f"  Score: {l8['score']}/{l8['max']} | Flags: {len(l8['flags'])}", flush=True)
-
     print("[Self-Test] Running sanity checks...", flush=True)
-    sanity_warnings = run_sanity_checks(l1, l2, l3, l3b, l3c, l3d, l3e, l8)
+    sanity_warnings = run_sanity_checks(l1, l2, l3, l3b, l3c, l3d, l3e)
     if sanity_warnings:
         for w in sanity_warnings:
             print(f"  🚨 {w}", flush=True)
@@ -1509,7 +1354,7 @@ def main():
         print("  All checks passed.", flush=True)
 
     print("[Layer 4] Computing composite score...")
-    score_data = compute_score(l1, l2, l3, l3b, l3c, l3d, l3e, l8)
+    score_data = compute_score(l1, l2, l3, l3b, l3c, l3d, l3e)
     print(f"\n  {score_data['emoji']} SIGNAL: {score_data['signal']} ({score_data['score']}/{score_data['max']})")
     print(f"  {score_data['summary']}")
 
@@ -1529,10 +1374,10 @@ def main():
         print(f"  ⚠️  Glint screen failed, skipping section: {e}", flush=True)
         glint_html = "💎 Glint screen unavailable today."
 
-    all_flags = l1["flags"] + l2["flags"] + l3["flags"] + l3b["flags"] + l3d["flags"] + l3e["flags"] + l8["flags"]
+    all_flags = l1["flags"] + l2["flags"] + l3["flags"] + l3b["flags"] + l3d["flags"] + l3e["flags"]
     flags_text = "\n".join(all_flags) if all_flags else "No flags raised."
     raw_data = {**l1.get("data", {}), **l2.get("data", {}), **l3.get("data", {}),
-                **l3b.get("data", {}), **l3d.get("data", {}), **l3e.get("data", {}), **l8.get("data", {})}
+                **l3b.get("data", {}), **l3d.get("data", {}), **l3e.get("data", {})}
     data_text = json.dumps(raw_data, indent=2)
 
     run_full, mode_reason = should_run_full_research(score_data["signal"])
@@ -1557,10 +1402,10 @@ def main():
         except Exception as e:
             print(f"  ⚠️  Full boardroom failed ({e}) — falling back to cheap board.", flush=True)
             research = None
-            boardroom = run_boardroom(score_data, l1, l2, l3, l8)
+            boardroom = run_boardroom(score_data, l1, l2, l3)
             boardroom = "[Desk view — full grounded run FAILED today, this is the unresearched fallback]\n\n" + boardroom
     else:
-        boardroom = run_boardroom(score_data, l1, l2, l3, l8)
+        boardroom = run_boardroom(score_data, l1, l2, l3)
         boardroom = f"[Desk view — {mode_reason}; member takes are NOT grounded in fresh research today]\n\n" + boardroom
     print(boardroom)
 
@@ -1574,7 +1419,7 @@ def main():
     log_run(boardroom_mode, mode_reason, research, tally, final_signal_data, score_data)
 
     print("\n[Layer 6] Generating trade ideas...")
-    trade_ideas = get_trade_ideas(score_data, l1, l2, l3, l8, effective_signal=final_signal_data["signal"])
+    trade_ideas = get_trade_ideas(score_data, l1, l2, l3, effective_signal=final_signal_data["signal"])
     print(trade_ideas)
 
     # A failed LLM call must land in the red warnings box - rendered as a
@@ -1589,16 +1434,14 @@ def main():
     shadow_output = ""
     if SHADOW_INDICATORS_AVAILABLE:
         try:
-            print("\n[Shadow Indicators] Running four new leading indicators (test mode)...", flush=True)
+            print("\n[Shadow Indicators] Running three new leading indicators (test mode)...", flush=True)
             breadth, breadth_status = fetch_breadth_indicator()
             vix_term, vix_status = fetch_vix_term_structure()
-            ted, ted_status = fetch_ted_spread()
             qqq_ratio, qqq_status = fetch_qqq_put_call_ratio()
-            shadow_score = calculate_shadow_score(breadth, vix_term, ted, qqq_ratio)
+            shadow_score = calculate_shadow_score(breadth, vix_term, qqq_ratio)
 
             print(f"  Market Breadth: {breadth:.1f}% [{breadth_status}]" if breadth else f"  Market Breadth: None [{breadth_status}]", flush=True)
             print(f"  VIX Term Ratio: {vix_term:.3f} [{vix_status}]" if vix_term else f"  VIX Term Ratio: None [{vix_status}]", flush=True)
-            print(f"  TED Spread: {ted:.1f}bps [{ted_status}]" if ted else f"  TED Spread: None [{ted_status}]", flush=True)
             print(f"  QQQ Put/Call: {qqq_ratio:.2f} [{qqq_status}]" if qqq_ratio else f"  QQQ Put/Call: None [{qqq_status}]", flush=True)
             print(f"  Shadow Score: {shadow_score}/35", flush=True)
 
@@ -1606,20 +1449,15 @@ def main():
                 f"\n📊 SHADOW INDICATORS (Test Period: Sep 26 — Oct 23)\n"
                 f"Market Breadth: {breadth:.1f}% [{breadth_status}]\n"
                 f"VIX Term Ratio: {vix_term:.3f} [{vix_status}]\n"
-                f"TED Spread: {ted:.1f}bps [{ted_status}]\n"
                 f"QQQ Put/Call: {qqq_ratio:.2f} [{qqq_status}]\n"
                 f"Shadow Score: {shadow_score}/35\n"
                 f"(Running in parallel — does NOT change RED/AMBER/GREEN signal until validated)"
-            ) if (breadth and vix_term and ted and qqq_ratio) else f"Shadow indicators incomplete (one or more failed to fetch)"
+            ) if (breadth and vix_term and qqq_ratio) else f"Shadow indicators incomplete (one or more failed to fetch)"
         except Exception as e:
             print(f"  ⚠️  Shadow indicators error: {e}", flush=True)
             shadow_output = f"Shadow indicators unavailable: {e}"
     else:
         shadow_output = "Shadow indicators module not loaded"
-
-    print("\n[Layer 8] Formatting TED spread for email...")
-    layer8_html = format_layer8_for_email(l8)
-    print(layer8_html)
 
     # Labeled inputs for Ark Protocol (not built yet): composite score,
     # the Boardroom's grounded market view, and its view on Glint's
@@ -1640,7 +1478,7 @@ def main():
     publish_ark_handoff(ark_inputs, ARK_HANDOFF_GIST_ID, GITHUB_GIST_TOKEN)
 
     print("\n[Layer 7] Sending email report...")
-    email_sent = send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html, glint_html, sanity_warnings, final_signal_data, glint_review, extra_flags=l3b["flags"] + l3d["flags"] + l3e["flags"], shadow_output=shadow_output, l3b=l3b, l3c=l3c, l3d=l3d, l3e=l3e, l8=l8)
+    email_sent = send_email(score_data, l1, l2, l3, boardroom, trade_ideas, glint_html, sanity_warnings, final_signal_data, glint_review, extra_flags=l3b["flags"] + l3d["flags"] + l3e["flags"], shadow_output=shadow_output, l3b=l3b, l3c=l3c, l3d=l3d, l3e=l3e)
 
     if not email_sent:
         print("\n" + "=" * 60)
