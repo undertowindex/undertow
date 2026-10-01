@@ -1183,7 +1183,57 @@ def generate_dials_dashboard(score_data, l1, l2, l3, l3b, l3c, l3d, l3e, l8):
     return dials_html
 
 
-def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", glint_html="", sanity_warnings=None, final_signal_data=None, glint_review="", extra_flags=None, shadow_output="", l3b=None, l3c=None, l3d=None, l3e=None, l8=None):
+def build_data_quality_dashboard(l1, l2, l3, l3b, l3c, l3d, l3e, l8):
+    """
+    Build a data quality dashboard showing which feeds are live and which are missing.
+    Returns HTML block and a data quality score (0-100, higher is better).
+    """
+    feeds = {
+        "Layer 1 (Equity)": bool(l1.get("data")),
+        "Layer 2 (Credit/Yield)": bool(l2.get("data")),
+        "Layer 3 (Macro)": bool(l3.get("data")),
+        "Layer 3b (COT/Repo)": bool(l3b.get("data")),
+        "Layer 3c (Put/Call)": bool(l3c.get("data")),
+        "Layer 3d (SKEW)": bool(l3d.get("data")),
+        "Layer 3e (Dealer Gamma)": bool(l3e.get("data")),
+        "Layer 8 SOFR Rate": bool(l8.get("data", {}).get("sofr_3m_pct")),
+        "Layer 8 SOFR Volume": bool(l8.get("data", {}).get("sofr_volume_b")),
+    }
+
+    live_feeds = sum(1 for v in feeds.values() if v)
+    total_feeds = len(feeds)
+    quality_pct = int((live_feeds / total_feeds) * 100)
+
+    html_rows = []
+    for feed_name, is_live in feeds.items():
+        status = "✅ LIVE" if is_live else "❌ MISSING"
+        color = "#2d7a2d" if is_live else "#a94442"
+        html_rows.append(f'<tr><td>{feed_name}</td><td style="color: {color}; font-weight: bold;">{status}</td></tr>')
+
+    quality_color = "#2d7a2d" if quality_pct >= 80 else "#ff9800" if quality_pct >= 60 else "#a94442"
+    quality_emoji = "🟢" if quality_pct >= 80 else "🟡" if quality_pct >= 60 else "🔴"
+
+    html = f"""
+<div style="margin: 20px 0; padding: 15px; background: #f9f9f9; border-left: 4px solid {quality_color}; border-radius: 4px;">
+  <h3 style="margin-top: 0; color: {quality_color};">{quality_emoji} DATA QUALITY DASHBOARD</h3>
+  <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+    <tr style="background: #f0f0f0;">
+      <th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd;">Feed</th>
+      <th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd;">Status</th>
+    </tr>
+    {''.join(html_rows)}
+  </table>
+  <p style="margin: 10px 0 0 0; font-size: 12px; color: #666;">
+    <strong>{live_feeds}/{total_feeds} feeds live</strong> — Signal is based on <strong>available data only</strong>.
+    Missing feeds do <strong>NOT</strong> inflate or deflate the composite score.
+  </p>
+</div>
+"""
+
+    return html, quality_pct
+
+
+def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", glint_html="", sanity_warnings=None, final_signal_data=None, glint_review="", extra_flags=None, shadow_output="", l3b=None, l3c=None, l3d=None, l3e=None, l8=None, quality_html=""):
     """Returns True only on a confirmed 200 from Resend. This is an
     early-warning system - a report that silently failed to send on the
     one day it mattered is worse than no report at all, so callers must
@@ -1265,6 +1315,7 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", g
   <h2 style="margin: 0; color: {signal_color};">Composite score: {score}/{score_data['max']} ({score_data['signal']})</h2>
   <p style="margin: 8px 0 0 0;">{score_data['summary']}</p>
 </div>
+{quality_html}
 {dials_html}
 {override_html}
 {sanity_html}
@@ -1376,28 +1427,40 @@ def get_layer8():
         r_sofr = requests.get(url, params=params_sofr, timeout=10)
         r_vol = requests.get(url, params=params_vol, timeout=10)
 
-        r_sofr.raise_for_status()
-        r_vol.raise_for_status()
+        sofr_fetch_ok = r_sofr.status_code == 200
+        vol_fetch_ok = r_vol.status_code == 200
 
         sofr_3m = None
         sofr_date = None
         volume_b = None
 
-        # Parse SOFR 3M rate
-        for obs in r_sofr.json().get("observations", []):
-            if obs["value"] != ".":
-                sofr_3m = float(obs["value"])
-                sofr_date = obs.get("date", "")
-                break
+        # Parse SOFR 3M rate (critical feed - if missing, fail gracefully)
+        if sofr_fetch_ok:
+            try:
+                for obs in r_sofr.json().get("observations", []):
+                    if obs["value"] != ".":
+                        sofr_3m = float(obs["value"])
+                        sofr_date = obs.get("date", "")
+                        break
+            except Exception as e:
+                print(f"  ⚠️  SOFR3Mfsr parse error: {e}", flush=True)
+        else:
+            print(f"  ⚠️  SOFR3Mfsr fetch failed: {r_sofr.status_code}", flush=True)
 
-        # Parse volume
-        for obs in r_vol.json().get("observations", []):
-            if obs["value"] != ".":
-                volume_b = float(obs["value"])
-                break
+        # Parse volume (optional - works if feed exists, skips gracefully if not)
+        if vol_fetch_ok:
+            try:
+                for obs in r_vol.json().get("observations", []):
+                    if obs["value"] != ".":
+                        volume_b = float(obs["value"])
+                        break
+            except Exception as e:
+                print(f"  ⚠️  SOFRVOL parse error: {e}", flush=True)
+        else:
+            print(f"  ⚠️  SOFRVOL fetch failed: {r_vol.status_code} (volume stress detection disabled)", flush=True)
 
         if sofr_3m is None:
-            return {"score": 0, "max": 5, "flags": ["SOFR: FRED data missing"], "data": {}}
+            return {"score": 0, "max": 5, "flags": ["SOFR3Mfsr: FRED data unavailable"], "data": {}}
 
         # Score based on SOFR rate AND volume (liquidity stress)
         # Thresholds calibrated to real market data
@@ -1656,6 +1719,10 @@ def main():
     layer8_html = format_layer8_for_email(l8)
     print(layer8_html)
 
+    print("\n[Data Quality] Building dashboard...")
+    quality_html, quality_pct = build_data_quality_dashboard(l1, l2, l3, l3b, l3c, l3d, l3e, l8)
+    print(f"  Data quality: {quality_pct}% ({sum(1 for l in [l1, l2, l3, l3b, l3c, l3d, l3e, l8] if l.get('data'))}/8 layers with data)")
+
     # Labeled inputs for Ark Protocol (not built yet): composite score,
     # the Boardroom's grounded market view, and its view on Glint's
     # candidates - logged as one JSON blob so Ark can consume reasoning,
@@ -1675,7 +1742,7 @@ def main():
     publish_ark_handoff(ark_inputs, ARK_HANDOFF_GIST_ID, GITHUB_GIST_TOKEN)
 
     print("\n[Layer 7] Sending email report...")
-    email_sent = send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html, glint_html, sanity_warnings, final_signal_data, glint_review, extra_flags=l3b["flags"] + l3d["flags"] + l3e["flags"], shadow_output=shadow_output, l3b=l3b, l3c=l3c, l3d=l3d, l3e=l3e, l8=l8)
+    email_sent = send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html, glint_html, sanity_warnings, final_signal_data, glint_review, extra_flags=l3b["flags"] + l3d["flags"] + l3e["flags"], shadow_output=shadow_output, l3b=l3b, l3c=l3c, l3d=l3d, l3e=l3e, l8=l8, quality_html=quality_html)
 
     if not email_sent:
         print("\n" + "=" * 60)
