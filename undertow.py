@@ -16,8 +16,7 @@ from boardroom_research import (
 try:
     from undertow_new_indicators import (
         fetch_breadth_indicator, fetch_vix_term_structure,
-        fetch_ted_spread, fetch_qqq_put_call_ratio,
-        calculate_shadow_score
+        fetch_qqq_put_call_ratio, calculate_shadow_score
     )
     SHADOW_INDICATORS_AVAILABLE = True
 except ImportError:
@@ -566,7 +565,7 @@ def run_sanity_checks(l1, l2, l3, l3b, l3c, l3d, l3e, l8):
     _check_freshness(warnings, "Layer 3b (reverse repo)", l3b["data"].get("reverse_repo_date"), max_age_days=5)
     _check_freshness(warnings, "Layer 3b (TED-equiv)", l3b["data"].get("ted_spread_date"), max_age_days=5)
     _check_freshness(warnings, "Layer 3d (SKEW)", l3d["data"].get("last_bar_date"), max_age_days=5)
-    _check_freshness(warnings, "Layer 8 (TED spread)", l8["data"].get("ted_spread_date"), max_age_days=5)
+    _check_freshness(warnings, "Layer 8 (SOFR)", l8["data"].get("sofr_date"), max_age_days=5)
 
     pcr = l3c["data"].get("put_call_ratio")
     if pcr is not None and not (0.1 <= pcr <= 5):
@@ -581,9 +580,9 @@ def run_sanity_checks(l1, l2, l3, l3b, l3c, l3d, l3e, l8):
         warnings.append(f"Layer 3e sanity: net GEX {gex_bn}bn per 1% outside plausible range (-100 to 100)")
     _check_freshness(warnings, "Layer 3e (GEX)", l3e["data"].get("last_bar_date"), max_age_days=5)
 
-    ted_bps = l8["data"].get("ted_spread_bps")
-    if ted_bps is not None and not (0 <= ted_bps <= 200):
-        warnings.append(f"Layer 8 sanity: TED spread {ted_bps}bps outside plausible range (0-200)")
+    sofr_bps = l8["data"].get("sofr_3m_bps")
+    if sofr_bps is not None and not (300 <= sofr_bps <= 1000):
+        warnings.append(f"Layer 8 sanity: SOFR 3M {sofr_bps}bps outside plausible range (300-1000)")
 
     for label, layer in [("Layer 1", l1), ("Layer 2", l2), ("Layer 3", l3), ("Layer 3b", l3b), ("Layer 3c", l3c), ("Layer 3d", l3d), ("Layer 3e", l3e), ("Layer 8", l8)]:
         if not (0 <= layer["score"] <= layer["max"]):
@@ -826,7 +825,7 @@ def get_layer3e(chain=None):
     return {"score": score, "max": 2, "flags": flags, "data": data}
 
 def compute_score(l1, l2, l3, l3b, l3c, l3d, l3e, l8):
-    # 2026-09-27: Added Layer 8 TED spread (+5 max). New max = 36.
+    # 2026-09-27: Added Layer 8 SOFR funding stress (+5 max). New max = 36.
     # Scaled thresholds from old (max=31): 10/31*36 ≈ 12, 19/31*36 ≈ 22.
     total = l1["score"] + l2["score"] + l3["score"] + l3b["score"] + l3c["score"] + l3d["score"] + l3e["score"] + l8["score"]
 
@@ -1103,7 +1102,7 @@ def generate_dials_dashboard(score_data, l1, l2, l3, l3b, l3c, l3d, l3e, l8):
         ("Put/Call Ratio", l3c),
         ("SKEW Index", l3d),
         ("Dealer Gamma", l3e),
-        ("TED Spread", l8),
+        ("SOFR Funding", l8),
     ]
 
     dials_html = f"""
@@ -1328,36 +1327,27 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", g
 # MAIN
 # ─────────────────────────────────────────────
 # ─────────────────────────────────────────────
-# LAYER 8: TED SPREAD (CREDIT STRESS INDICATOR)
+# LAYER 8: SOFR FUNDING STRESS (CREDIT STRESS INDICATOR)
 # ─────────────────────────────────────────────
 
 def get_layer8():
-    """TED Spread: SOFR 3M minus Fed Funds rate (basis points).
+    """SOFR Funding Stress: 3M SOFR Term Rate (basis points).
 
-    Widens 48-72 hours before credit events. Uses FRED API.
-    Signal: <50bps=calm, 50-80=caution, >80=stress.
+    Measures short-term funding costs. Elevated during credit stress.
+    Uses FRED API. Signal: <100bps=calm, 100-150=caution, >150=stress.
     Returns {score (0-5), max, flags, data}.
     """
     try:
         fred_key = os.environ.get("FRED_API_KEY", "").strip()
         if not fred_key:
-            return {"score": 0, "max": 5, "flags": ["TED spread: FRED_API_KEY not set"], "data": {}}
+            return {"score": 0, "max": 5, "flags": ["SOFR: FRED_API_KEY not set"], "data": {}}
 
-        # Fetch 3-Month Treasury Bill Rate and Fed Funds Rate from FRED
-        # TED Spread = (3M SOFR or T-Bill) - (Fed Funds), measures credit stress
-        # Using DGS3MO (3-Month Treasury Bill) as proxy for short-term funding cost
+        # Fetch 3-Month SOFR Term Rate from FRED
+        # SOFR3Mfsr = 3-Month SOFR term rate (forward-looking funding cost)
         url_sofr = "https://api.stlouisfed.org/fred/series/observations"
-        url_ff = "https://api.stlouisfed.org/fred/series/observations"
 
         params_sofr = {
-            "series_id": "DGS3MO",  # 3-Month Treasury Bill Rate (SOFR3M not available in FRED)
-            "api_key": fred_key,
-            "file_type": "json",
-            "sort_order": "desc",
-            "limit": 1
-        }
-        params_ff = {
-            "series_id": "FEDFUNDS",
+            "series_id": "SOFR3Mfsr",  # 3-Month SOFR Term Rate
             "api_key": fred_key,
             "file_type": "json",
             "sort_order": "desc",
@@ -1365,57 +1355,49 @@ def get_layer8():
         }
 
         r_sofr = requests.get(url_sofr, params=params_sofr, timeout=10)
-        r_ff = requests.get(url_ff, params=params_ff, timeout=10)
-
         r_sofr.raise_for_status()
-        r_ff.raise_for_status()
 
-        tbill_val = None
-        ff_val = None
+        sofr_3m = None
+        sofr_date = None
 
         for obs in r_sofr.json().get("observations", []):
             if obs["value"] != ".":
-                tbill_val = float(obs["value"])
+                sofr_3m = float(obs["value"])
+                sofr_date = obs.get("date", "")
                 break
 
-        for obs in r_ff.json().get("observations", []):
-            if obs["value"] != ".":
-                ff_val = float(obs["value"])
-                break
+        if sofr_3m is None:
+            return {"score": 0, "max": 5, "flags": ["SOFR: FRED data missing"], "data": {}}
 
-        if tbill_val is None or ff_val is None:
-            return {"score": 0, "max": 5, "flags": ["TED spread: FRED data missing"], "data": {}}
+        # Convert percentage to basis points
+        sofr_3m_bps = sofr_3m * 100
 
-        # TED Spread = 3M T-Bill Rate - Fed Funds Rate
-        ted = tbill_val - ff_val
-
-        # Score thresholds (basis points)
-        if ted < 50:
+        # Score thresholds (basis points) - SOFR typically 400-600bps; stress >500-600
+        if sofr_3m_bps < 500:
             score = 0
             status = "NORMAL"
-        elif ted < 80:
+        elif sofr_3m_bps < 550:
             score = 2
             status = "CAUTION"
         else:
             score = 5
             status = "STRESS"
 
-        flags = [f"TED spread elevated: {ted:.1f}bps [{status}]"] if score > 0 else []
-        date_str = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+        flags = [f"SOFR 3M elevated: {sofr_3m_bps:.1f}bps [{status}]"] if score > 0 else []
+        date_str = sofr_date if sofr_date else datetime.datetime.utcnow().strftime("%Y-%m-%d")
 
         return {
             "score": score,
             "max": 5,
             "flags": flags,
             "data": {
-                "ted_spread_bps": ted,
-                "tbill_3m": tbill_val,
-                "fed_funds": ff_val,
-                "ted_spread_date": date_str
+                "sofr_3m_bps": sofr_3m_bps,
+                "sofr_3m_pct": sofr_3m,
+                "sofr_date": date_str
             }
         }
     except Exception as e:
-        err_msg = f"TED spread fetch error: {type(e).__name__}: {str(e)[:60]}"
+        err_msg = f"SOFR fetch error: {type(e).__name__}: {str(e)[:60]}"
         print(f"  ⚠️  {err_msg}", flush=True)
         return {"score": 0, "max": 5, "flags": [err_msg], "data": {}}
 
@@ -1424,29 +1406,26 @@ def format_layer8_for_email(layer8_data):
     """
     Formats Layer 8 output into a clean text block for the email report.
     """
-    if "ted_spread_bps" not in layer8_data.get("data", {}):
+    if "sofr_3m_bps" not in layer8_data.get("data", {}):
         if layer8_data.get("flags"):
-            return f"📊 TED Spread: {layer8_data['flags'][0]}"
-        return "📊 TED Spread: unavailable"
+            return f"📊 SOFR Funding Stress: {layer8_data['flags'][0]}"
+        return "📊 SOFR Funding Stress: unavailable"
 
-    ted = layer8_data["data"]["ted_spread_bps"]
-    tbill = layer8_data["data"]["tbill_3m"]
-    ff = layer8_data["data"]["fed_funds"]
-    date_str = layer8_data["data"].get("ted_spread_date", "")
+    sofr_bps = layer8_data["data"]["sofr_3m_bps"]
+    sofr_pct = layer8_data["data"]["sofr_3m_pct"]
+    date_str = layer8_data["data"].get("sofr_date", "")
 
-    lines = ["📊 TED SPREAD — CREDIT STRESS INDICATOR", ""]
-    lines.append(f"TED Spread: {ted:.1f} basis points")
-    lines.append(f"3M T-Bill: {tbill:.3f}%")
-    lines.append(f"Fed Funds: {ff:.3f}%")
+    lines = ["📊 SOFR FUNDING STRESS — CREDIT INDICATOR", ""]
+    lines.append(f"SOFR 3M Term Rate: {sofr_bps:.1f} basis points ({sofr_pct:.3f}%)")
     lines.append(f"Date: {date_str}")
     lines.append("")
 
-    if ted < 50:
-        lines.append("Status: NORMAL — no credit stress detected")
-    elif ted < 80:
-        lines.append("Status: CAUTION — elevated credit spreads, monitor for widening")
+    if sofr_bps < 500:
+        lines.append("Status: NORMAL — baseline funding costs")
+    elif sofr_bps < 550:
+        lines.append("Status: CAUTION — elevated funding costs, monitor for stress")
     else:
-        lines.append("Status: STRESS — significant credit stress signal")
+        lines.append("Status: STRESS — elevated credit funding stress signal")
 
     if layer8_data.get("flags"):
         lines.append("")
@@ -1589,28 +1568,23 @@ def main():
     shadow_output = ""
     if SHADOW_INDICATORS_AVAILABLE:
         try:
-            print("\n[Shadow Indicators] Running four new leading indicators (test mode)...", flush=True)
+            print("\n[Shadow Indicators] Running three new leading indicators (test mode)...", flush=True)
             breadth, breadth_status = fetch_breadth_indicator()
             vix_term, vix_status = fetch_vix_term_structure()
-            ted, ted_status = fetch_ted_spread()
             qqq_ratio, qqq_status = fetch_qqq_put_call_ratio()
-            shadow_score = calculate_shadow_score(breadth, vix_term, ted, qqq_ratio)
+            # Note: TED Spread replaced with SOFR in Layer 8 (no longer in shadow indicators)
 
             print(f"  Market Breadth: {breadth:.1f}% [{breadth_status}]" if breadth else f"  Market Breadth: None [{breadth_status}]", flush=True)
             print(f"  VIX Term Ratio: {vix_term:.3f} [{vix_status}]" if vix_term else f"  VIX Term Ratio: None [{vix_status}]", flush=True)
-            print(f"  TED Spread: {ted:.1f}bps [{ted_status}]" if ted else f"  TED Spread: None [{ted_status}]", flush=True)
             print(f"  QQQ Put/Call: {qqq_ratio:.2f} [{qqq_status}]" if qqq_ratio else f"  QQQ Put/Call: None [{qqq_status}]", flush=True)
-            print(f"  Shadow Score: {shadow_score}/35", flush=True)
 
             shadow_output = (
                 f"\n📊 SHADOW INDICATORS (Test Period: Sep 26 — Oct 23)\n"
                 f"Market Breadth: {breadth:.1f}% [{breadth_status}]\n"
                 f"VIX Term Ratio: {vix_term:.3f} [{vix_status}]\n"
-                f"TED Spread: {ted:.1f}bps [{ted_status}]\n"
                 f"QQQ Put/Call: {qqq_ratio:.2f} [{qqq_status}]\n"
-                f"Shadow Score: {shadow_score}/35\n"
                 f"(Running in parallel — does NOT change RED/AMBER/GREEN signal until validated)"
-            ) if (breadth and vix_term and ted and qqq_ratio) else f"Shadow indicators incomplete (one or more failed to fetch)"
+            ) if (breadth and vix_term and qqq_ratio) else f"Shadow indicators incomplete (one or more failed to fetch)"
         except Exception as e:
             print(f"  ⚠️  Shadow indicators error: {e}", flush=True)
             shadow_output = f"Shadow indicators unavailable: {e}"
