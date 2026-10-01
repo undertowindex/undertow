@@ -580,9 +580,13 @@ def run_sanity_checks(l1, l2, l3, l3b, l3c, l3d, l3e, l8):
         warnings.append(f"Layer 3e sanity: net GEX {gex_bn}bn per 1% outside plausible range (-100 to 100)")
     _check_freshness(warnings, "Layer 3e (GEX)", l3e["data"].get("last_bar_date"), max_age_days=5)
 
-    sofr_bps = l8["data"].get("sofr_3m_bps")
-    if sofr_bps is not None and not (300 <= sofr_bps <= 1000):
-        warnings.append(f"Layer 8 sanity: SOFR 3M {sofr_bps}bps outside plausible range (300-1000)")
+    sofr_pct = l8["data"].get("sofr_3m_pct")
+    if sofr_pct is not None and not (3.0 <= sofr_pct <= 6.0):
+        warnings.append(f"Layer 8 sanity: SOFR 3M {sofr_pct:.2f}% outside plausible range (3.0-6.0%)")
+
+    volume_b = l8["data"].get("sofr_volume_b")
+    if volume_b is not None and not (2500 <= volume_b <= 4000):
+        warnings.append(f"Layer 8 sanity: SOFR volume {volume_b:.0f}B outside plausible range (2,500-4,000B)")
 
     for label, layer in [("Layer 1", l1), ("Layer 2", l2), ("Layer 3", l3), ("Layer 3b", l3b), ("Layer 3c", l3c), ("Layer 3d", l3d), ("Layer 3e", l3e), ("Layer 8", l8)]:
         if not (0 <= layer["score"] <= layer["max"]):
@@ -1331,10 +1335,16 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", g
 # ─────────────────────────────────────────────
 
 def get_layer8():
-    """SOFR Funding Stress: 3M SOFR Term Rate (basis points).
+    """SOFR Funding Stress: 3M SOFR Term Rate + Volume (NY Fed data).
 
-    Measures short-term funding costs. Elevated during credit stress.
-    Uses FRED API. Signal: <100bps=calm, 100-150=caution, >150=stress.
+    Measures short-term funding costs AND market liquidity. Elevated rates
+    + low volume = funding squeeze (credit stress). Uses FRED API.
+
+    Thresholds calibrated to Sept 2026 market data:
+    - CALM: SOFR < 3.80% AND volume > 2,950B
+    - CAUTION: SOFR 3.80-3.90% OR volume 2,850-2,950B
+    - STRESS: SOFR > 3.90% AND volume < 2,850B
+
     Returns {score (0-5), max, flags, data}.
     """
     try:
@@ -1342,48 +1352,86 @@ def get_layer8():
         if not fred_key:
             return {"score": 0, "max": 5, "flags": ["SOFR: FRED_API_KEY not set"], "data": {}}
 
-        # Fetch 3-Month SOFR Term Rate from FRED
-        # SOFR3Mfsr = 3-Month SOFR term rate (forward-looking funding cost)
-        url_sofr = "https://api.stlouisfed.org/fred/series/observations"
+        # Fetch 3-Month SOFR Term Rate + Volume from FRED
+        url = "https://api.stlouisfed.org/fred/series/observations"
 
+        # SOFR 3M Term Rate (from NY Fed, via FRED)
         params_sofr = {
-            "series_id": "SOFR3Mfsr",  # 3-Month SOFR Term Rate
+            "series_id": "SOFR3Mfsr",
             "api_key": fred_key,
             "file_type": "json",
             "sort_order": "desc",
             "limit": 1
         }
 
-        r_sofr = requests.get(url_sofr, params=params_sofr, timeout=10)
+        # SOFR Volume (billions, from FRED)
+        params_vol = {
+            "series_id": "SOFRVOL",  # SOFR Volume (all maturities)
+            "api_key": fred_key,
+            "file_type": "json",
+            "sort_order": "desc",
+            "limit": 1
+        }
+
+        r_sofr = requests.get(url, params=params_sofr, timeout=10)
+        r_vol = requests.get(url, params=params_vol, timeout=10)
+
         r_sofr.raise_for_status()
+        r_vol.raise_for_status()
 
         sofr_3m = None
         sofr_date = None
+        volume_b = None
 
+        # Parse SOFR 3M rate
         for obs in r_sofr.json().get("observations", []):
             if obs["value"] != ".":
                 sofr_3m = float(obs["value"])
                 sofr_date = obs.get("date", "")
                 break
 
+        # Parse volume
+        for obs in r_vol.json().get("observations", []):
+            if obs["value"] != ".":
+                volume_b = float(obs["value"])
+                break
+
         if sofr_3m is None:
             return {"score": 0, "max": 5, "flags": ["SOFR: FRED data missing"], "data": {}}
 
-        # Convert percentage to basis points
-        sofr_3m_bps = sofr_3m * 100
+        # Score based on SOFR rate AND volume (liquidity stress)
+        # Thresholds calibrated to real market data
+        score = 0
+        status = "NORMAL"
+        flags = []
 
-        # Score thresholds (basis points) - SOFR typically 400-600bps; stress >500-600
-        if sofr_3m_bps < 500:
-            score = 0
-            status = "NORMAL"
-        elif sofr_3m_bps < 550:
-            score = 2
-            status = "CAUTION"
-        else:
+        sofr_stress = sofr_3m >= 3.90  # SOFR elevated
+        sofr_caution = 3.80 <= sofr_3m < 3.90  # SOFR rising
+        vol_stress = volume_b is not None and volume_b < 2850  # Volume drying up
+        vol_caution = volume_b is not None and 2850 <= volume_b <= 2950
+
+        if sofr_stress and vol_stress:
+            # Both rate AND volume stressed = real funding crisis
             score = 5
             status = "STRESS"
+            flags.append(f"SOFR funding crisis: {sofr_3m:.2f}% + volume {volume_b:.0f}B (collapsed)")
+        elif sofr_stress or vol_stress:
+            # Either rate spiking OR volume drying up = caution
+            score = 2
+            status = "CAUTION"
+            if sofr_stress:
+                flags.append(f"SOFR elevated: {sofr_3m:.2f}% (watch for stress)")
+            if vol_stress:
+                flags.append(f"SOFR volume stress: {volume_b:.0f}B (below 2,850 threshold)")
+        elif sofr_caution or vol_caution:
+            # Minor elevation = watch it
+            score = 1
+            status = "WATCH"
+            if sofr_caution:
+                flags.append(f"SOFR rising: {sofr_3m:.2f}%")
+            if vol_caution:
+                flags.append(f"SOFR volume elevated: {volume_b:.0f}B")
 
-        flags = [f"SOFR 3M elevated: {sofr_3m_bps:.1f}bps [{status}]"] if score > 0 else []
         date_str = sofr_date if sofr_date else datetime.datetime.utcnow().strftime("%Y-%m-%d")
 
         return {
@@ -1391,9 +1439,10 @@ def get_layer8():
             "max": 5,
             "flags": flags,
             "data": {
-                "sofr_3m_bps": sofr_3m_bps,
                 "sofr_3m_pct": sofr_3m,
-                "sofr_date": date_str
+                "sofr_volume_b": volume_b,
+                "sofr_date": date_str,
+                "sofr_status": status
             }
         }
     except Exception as e:
@@ -1405,32 +1454,44 @@ def get_layer8():
 def format_layer8_for_email(layer8_data):
     """
     Formats Layer 8 output into a clean text block for the email report.
+    Displays SOFR rate + volume to detect funding liquidity stress.
     """
-    if "sofr_3m_bps" not in layer8_data.get("data", {}):
+    data = layer8_data.get("data", {})
+
+    if "sofr_3m_pct" not in data:
         if layer8_data.get("flags"):
             return f"📊 SOFR Funding Stress: {layer8_data['flags'][0]}"
         return "📊 SOFR Funding Stress: unavailable"
 
-    sofr_bps = layer8_data["data"]["sofr_3m_bps"]
-    sofr_pct = layer8_data["data"]["sofr_3m_pct"]
-    date_str = layer8_data["data"].get("sofr_date", "")
+    sofr_pct = data["sofr_3m_pct"]
+    volume_b = data.get("sofr_volume_b")
+    date_str = data.get("sofr_date", "")
+    status = data.get("sofr_status", "UNKNOWN")
 
-    lines = ["📊 SOFR FUNDING STRESS — CREDIT INDICATOR", ""]
-    lines.append(f"SOFR 3M Term Rate: {sofr_bps:.1f} basis points ({sofr_pct:.3f}%)")
+    lines = ["📊 SOFR FUNDING STRESS — NY FED CREDIT INDICATOR", ""]
+    lines.append(f"SOFR 3M Term Rate: {sofr_pct:.2f}%")
+    if volume_b is not None:
+        lines.append(f"SOFR Trading Volume: ${volume_b:.0f}B")
     lines.append(f"Date: {date_str}")
     lines.append("")
 
-    if sofr_bps < 500:
-        lines.append("Status: NORMAL — baseline funding costs")
-    elif sofr_bps < 550:
-        lines.append("Status: CAUTION — elevated funding costs, monitor for stress")
+    if status == "STRESS":
+        lines.append("Status: 🔴 STRESS — funding liquidity crisis signal")
+    elif status == "CAUTION":
+        lines.append("Status: 🟡 CAUTION — elevated funding costs or volume stress, monitor closely")
+    elif status == "WATCH":
+        lines.append("Status: 🟡 WATCH — minor elevation, keep eyes on this")
     else:
-        lines.append("Status: STRESS — elevated credit funding stress signal")
+        lines.append("Status: 🟢 NORMAL — baseline funding conditions")
 
     if layer8_data.get("flags"):
         lines.append("")
         for f in layer8_data["flags"]:
             lines.append(f"⚡ {f}")
+
+    # Add context: show thresholds for transparency
+    lines.append("")
+    lines.append("Thresholds: CALM (SOFR<3.80% + Vol>2,950B) | CAUTION (SOFR 3.80-3.90% OR Vol 2,850-2,950B) | STRESS (SOFR>3.90% + Vol<2,850B)")
 
     return "\n".join(lines)
 
