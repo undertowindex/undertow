@@ -60,6 +60,20 @@ ALERT_EMAILS = [e.strip() for e in ALERT_EMAIL.split(",") if e.strip()]
 GITHUB_GIST_TOKEN = os.environ.get("GITHUB_GIST_TOKEN", "").strip()
 ARK_HANDOFF_GIST_ID = os.environ.get("ARK_HANDOFF_GIST_ID", "")
 
+# LAYER 8 SOFR THRESHOLDS (dynamic, calibrated to current Fed target)
+# Set FED_TARGET_RATE in environment to current Fed funds target midpoint (e.g., "4.25")
+# Thresholds calculated as: Fed_Target + spread
+# CAUTION: Fed_Target + 1.20pp (e.g., 5.45% if Fed target is 4.25%)
+# WARNING: Fed_Target + 1.75pp (e.g., 6.00% if Fed target is 4.25%)
+try:
+    FED_TARGET_RATE = float(os.environ.get("FED_TARGET_RATE", "4.25").strip())
+except ValueError:
+    FED_TARGET_RATE = 4.25  # Fallback to current approximate target
+    print("⚠️  FED_TARGET_RATE invalid, defaulting to 4.25%", flush=True)
+
+SOFR_CAUTION_THRESHOLD = FED_TARGET_RATE + 1.20
+SOFR_WARNING_THRESHOLD = FED_TARGET_RATE + 1.75
+
 # ─────────────────────────────────────────────
 def publish_ark_handoff(ark_inputs, gist_id, token):
     """Publishes ark_inputs to a secret GitHub Gist so Ark, running locally
@@ -1423,10 +1437,13 @@ def get_layer8():
     Measures short-term funding costs AND market liquidity. Elevated rates
     + low volume = funding squeeze (credit stress). Uses FRED API.
 
-    Thresholds calibrated to Sept 2026 market data:
-    - CALM: SOFR < 3.80% AND volume > 2,950B
-    - CAUTION: SOFR 3.80-3.90% OR volume 2,850-2,950B
-    - STRESS: SOFR > 3.90% AND volume < 2,850B
+    Thresholds are DYNAMIC, calibrated to current Fed target rate:
+    - CALM: SOFR < Fed_Target + 1.00pp AND volume > 2,950B
+    - CAUTION: SOFR Fed_Target + 1.00pp to Fed_Target + 1.20pp OR volume 2,850-2,950B
+    - STRESS: SOFR >= Fed_Target + 1.75pp AND volume < 2,850B
+
+    Fed_Target is read from FED_TARGET_RATE environment variable (default 4.25%)
+    Update FED_TARGET_RATE on Railway whenever Fed changes target.
 
     Returns {score (0-5), max, flags, data}.
     """
@@ -1495,13 +1512,19 @@ def get_layer8():
             return {"score": 0, "max": 5, "flags": ["SOFR3Mfsr: FRED data unavailable"], "data": {}}
 
         # Score based on SOFR rate AND volume (liquidity stress)
-        # Thresholds calibrated to real market data
+        # Thresholds are DYNAMIC, tied to current Fed target rate
         score = 0
         status = "NORMAL"
         flags = []
 
-        sofr_stress = sofr_3m >= 3.90  # SOFR elevated
-        sofr_caution = 3.80 <= sofr_3m < 3.90  # SOFR rising
+        # Dynamic thresholds from config (based on FED_TARGET_RATE environment variable)
+        sofr_warning_level = SOFR_WARNING_THRESHOLD  # Fed_Target + 1.75pp
+        sofr_caution_level = SOFR_CAUTION_THRESHOLD  # Fed_Target + 1.20pp
+        sofr_watch_level = FED_TARGET_RATE + 1.00  # Fed_Target + 1.00pp
+
+        sofr_stress = sofr_3m >= sofr_warning_level  # SOFR critically elevated
+        sofr_caution = sofr_caution_level <= sofr_3m < sofr_warning_level  # SOFR tightening
+        sofr_watch = sofr_watch_level <= sofr_3m < sofr_caution_level  # SOFR slightly above Fed rate
         vol_stress = volume_b is not None and volume_b < 2850  # Volume drying up
         vol_caution = volume_b is not None and 2850 <= volume_b <= 2950
 
@@ -1509,23 +1532,28 @@ def get_layer8():
             # Both rate AND volume stressed = real funding crisis
             score = 5
             status = "STRESS"
-            flags.append(f"SOFR funding crisis: {sofr_3m:.2f}% + volume {volume_b:.0f}B (collapsed)")
+            flags.append(f"SOFR funding crisis: {sofr_3m:.2f}% (threshold {sofr_warning_level:.2f}%) + volume {volume_b:.0f}B (collapsed)")
         elif sofr_stress or vol_stress:
             # Either rate spiking OR volume drying up = caution
             score = 2
             status = "CAUTION"
             if sofr_stress:
-                flags.append(f"SOFR elevated: {sofr_3m:.2f}% (watch for stress)")
+                flags.append(f"SOFR critically elevated: {sofr_3m:.2f}% (≥{sofr_warning_level:.2f}% warning level)")
             if vol_stress:
                 flags.append(f"SOFR volume stress: {volume_b:.0f}B (below 2,850 threshold)")
         elif sofr_caution or vol_caution:
-            # Minor elevation = watch it
+            # Elevated but not critical = watch closely
             score = 1
             status = "WATCH"
             if sofr_caution:
-                flags.append(f"SOFR rising: {sofr_3m:.2f}%")
+                flags.append(f"SOFR elevated: {sofr_3m:.2f}% ({sofr_caution_level:.2f}%-{sofr_warning_level:.2f}% caution band)")
             if vol_caution:
                 flags.append(f"SOFR volume elevated: {volume_b:.0f}B")
+        elif sofr_watch:
+            # Above Fed rate but not yet concerning
+            score = 0
+            status = "WATCH"
+            flags.append(f"SOFR slightly above Fed rate: {sofr_3m:.2f}% (Fed target {FED_TARGET_RATE:.2f}%)")
 
         date_str = sofr_date if sofr_date else datetime.datetime.utcnow().strftime("%Y-%m-%d")
 
