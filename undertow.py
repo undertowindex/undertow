@@ -1461,20 +1461,24 @@ def get_layer8():
             "api_key": fred_key,
             "file_type": "json",
             "sort_order": "desc",
-            "limit": 1
+            "limit": 2  # Get 2 in case today's not published yet
         }
 
-        # SOFR Volume (billions, from FRED)
+        # SOFR Volume (billions, from FRED) - often lags by 1-2 days
         params_vol = {
-            "series_id": "SOFRVOL",  # SOFR Volume (all maturities)
+            "series_id": "SOFRVOL",
             "api_key": fred_key,
             "file_type": "json",
             "sort_order": "desc",
-            "limit": 1
+            "limit": 2  # Get 2 in case today's not published
         }
 
-        r_sofr = requests.get(url, params=params_sofr, timeout=10)
-        r_vol = requests.get(url, params=params_vol, timeout=10)
+        try:
+            r_sofr = requests.get(url, params=params_sofr, timeout=10)
+            r_vol = requests.get(url, params=params_vol, timeout=10)
+        except Exception as e:
+            print(f"  ⚠️  SOFR FRED API connection error: {e}", flush=True)
+            return {"score": 0, "max": 5, "flags": [f"SOFR: FRED API unreachable ({str(e)[:40]})"], "data": {}}
 
         sofr_fetch_ok = r_sofr.status_code == 200
         vol_fetch_ok = r_vol.status_code == 200
@@ -1486,27 +1490,37 @@ def get_layer8():
         # Parse SOFR 3M rate (critical feed - if missing, fail gracefully)
         if sofr_fetch_ok:
             try:
-                for obs in r_sofr.json().get("observations", []):
+                obs_list = r_sofr.json().get("observations", [])
+                if not obs_list:
+                    print(f"  ⚠️  SOFR3Mfsr: No observations returned from FRED", flush=True)
+                for obs in obs_list:
                     if obs["value"] != ".":
                         sofr_3m = float(obs["value"])
                         sofr_date = obs.get("date", "")
                         break
             except Exception as e:
                 print(f"  ⚠️  SOFR3Mfsr parse error: {e}", flush=True)
+                print(f"      Response text: {r_sofr.text[:200]}", flush=True)
         else:
-            print(f"  ⚠️  SOFR3Mfsr fetch failed: {r_sofr.status_code}", flush=True)
+            print(f"  ⚠️  SOFR3Mfsr fetch failed: HTTP {r_sofr.status_code}", flush=True)
+            print(f"      Response: {r_sofr.text[:200]}", flush=True)
 
         # Parse volume (optional - works if feed exists, skips gracefully if not)
         if vol_fetch_ok:
             try:
-                for obs in r_vol.json().get("observations", []):
+                obs_list = r_vol.json().get("observations", [])
+                if not obs_list:
+                    print(f"  ⚠️  SOFRVOL: No observations returned from FRED (data may lag 1-2 days)", flush=True)
+                for obs in obs_list:
                     if obs["value"] != ".":
                         volume_b = float(obs["value"])
                         break
             except Exception as e:
                 print(f"  ⚠️  SOFRVOL parse error: {e}", flush=True)
+                print(f"      Response text: {r_vol.text[:200]}", flush=True)
         else:
-            print(f"  ⚠️  SOFRVOL fetch failed: {r_vol.status_code} (volume stress detection disabled)", flush=True)
+            print(f"  ⚠️  SOFRVOL fetch failed: HTTP {r_vol.status_code} (volume stress detection disabled)", flush=True)
+            print(f"      Response: {r_vol.text[:200]}", flush=True)
 
         if sofr_3m is None:
             return {"score": 0, "max": 5, "flags": ["SOFR3Mfsr: FRED data unavailable"], "data": {}}
@@ -1604,7 +1618,7 @@ def get_layer9():
             "api_key": fred_key,
             "file_type": "json",
             "sort_order": "desc",
-            "limit": 2
+            "limit": 3  # Get 3 to handle if latest isn't published yet
         }
 
         # Fetch ANFCI — need 2 recent observations for divergence detection
@@ -1613,11 +1627,15 @@ def get_layer9():
             "api_key": fred_key,
             "file_type": "json",
             "sort_order": "desc",
-            "limit": 2
+            "limit": 3  # Get 3 to handle if latest isn't published yet
         }
 
-        r_nfci = requests.get(url, params=params_nfci, timeout=10)
-        r_anfci = requests.get(url, params=params_anfci, timeout=10)
+        try:
+            r_nfci = requests.get(url, params=params_nfci, timeout=10)
+            r_anfci = requests.get(url, params=params_anfci, timeout=10)
+        except Exception as e:
+            print(f"  ⚠️  NFCI FRED API connection error: {e}", flush=True)
+            return {"score": 0, "max": 5, "flags": [f"NFCI: FRED API unreachable ({str(e)[:40]})"], "data": {}}
 
         nfci_fetch_ok = r_nfci.status_code == 200
         anfci_fetch_ok = r_anfci.status_code == 200
@@ -1626,7 +1644,11 @@ def get_layer9():
         nfci_observations = []
         if nfci_fetch_ok:
             try:
-                for obs in r_nfci.json().get("observations", []):
+                obs_list = r_nfci.json().get("observations", [])
+                if not obs_list:
+                    print(f"  ⚠️  NFCI: No observations returned from FRED (published weekly, may lag)", flush=True)
+                    return {"score": 0, "max": 5, "flags": ["NFCI: No recent FRED observations (published Wed)"], "data": {}}
+                for obs in obs_list:
                     if obs["value"] != ".":
                         nfci_observations.append({
                             "value": float(obs["value"]),
@@ -1636,16 +1658,21 @@ def get_layer9():
                     return {"score": 0, "max": 5, "flags": ["NFCI: No valid FRED observations"], "data": {}}
             except Exception as e:
                 print(f"  ⚠️  NFCI parse error: {e}", flush=True)
+                print(f"      Response text: {r_nfci.text[:300]}", flush=True)
                 return {"score": 0, "max": 5, "flags": [f"NFCI parse error: {e}"], "data": {}}
         else:
-            print(f"  ⚠️  NFCI fetch failed: {r_nfci.status_code}", flush=True)
-            return {"score": 0, "max": 5, "flags": [f"NFCI fetch failed: {r_nfci.status_code}"], "data": {}}
+            print(f"  ⚠️  NFCI fetch failed: HTTP {r_nfci.status_code}", flush=True)
+            print(f"      Response: {r_nfci.text[:300]}", flush=True)
+            return {"score": 0, "max": 5, "flags": [f"NFCI fetch failed: HTTP {r_nfci.status_code}"], "data": {}}
 
         # Parse ANFCI current and prior
         anfci_observations = []
         if anfci_fetch_ok:
             try:
-                for obs in r_anfci.json().get("observations", []):
+                obs_list = r_anfci.json().get("observations", [])
+                if not obs_list:
+                    print(f"  ⚠️  ANFCI: No observations returned from FRED (may lag NFCI)", flush=True)
+                for obs in obs_list:
                     if obs["value"] != ".":
                         anfci_observations.append({
                             "value": float(obs["value"]),
@@ -1653,10 +1680,12 @@ def get_layer9():
                         })
             except Exception as e:
                 print(f"  ⚠️  ANFCI parse error: {e}", flush=True)
+                print(f"      Response text: {r_anfci.text[:300]}", flush=True)
                 # ANFCI fetch failure is recoverable — use NFCI only
                 anfci_observations = []
         else:
-            print(f"  ⚠️  ANFCI fetch failed: {r_anfci.status_code}", flush=True)
+            print(f"  ⚠️  ANFCI fetch failed: HTTP {r_anfci.status_code}", flush=True)
+            print(f"      Response: {r_anfci.text[:300]}", flush=True)
             # ANFCI is optional for scoring but helps divergence detection
 
         # Extract current values
