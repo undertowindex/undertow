@@ -1523,7 +1523,22 @@ def get_layer8():
             print(f"      Response: {r_vol.text[:200]}", flush=True)
 
         if sofr_3m is None:
-            return {"score": 0, "max": 5, "flags": ["SOFR3Mfsr: FRED data unavailable"], "data": {}}
+            # Try fallback: read yesterday's cached SOFR value if it exists
+            cache_file = "/tmp/undertow_sofr_cache.json"
+            if os.path.exists(cache_file):
+                try:
+                    with open(cache_file, 'r') as f:
+                        cached = json.load(f)
+                        sofr_3m = cached.get("sofr_3m_pct")
+                        sofr_date = cached.get("sofr_date", "")
+                        volume_b = cached.get("sofr_volume_b")
+                        if sofr_3m is not None:
+                            print(f"  ℹ️  Using cached SOFR from {sofr_date} (live data unavailable)", flush=True)
+                except Exception as e:
+                    print(f"  ⚠️  Could not read SOFR cache: {e}", flush=True)
+
+            if sofr_3m is None:
+                return {"score": 0, "max": 5, "flags": ["SOFR3Mfsr: FRED data unavailable (no cache)"], "data": {}}
 
         # Score based on SOFR rate AND volume (liquidity stress)
         # Thresholds are DYNAMIC, tied to current Fed target rate
@@ -1570,6 +1585,18 @@ def get_layer8():
             flags.append(f"SOFR slightly above Fed rate: {sofr_3m:.2f}% (Fed target {FED_TARGET_RATE:.2f}%)")
 
         date_str = sofr_date if sofr_date else datetime.datetime.utcnow().strftime("%Y-%m-%d")
+
+        # Cache this successful fetch for fallback if tomorrow's fails
+        try:
+            cache_data = {
+                "sofr_3m_pct": sofr_3m,
+                "sofr_volume_b": volume_b,
+                "sofr_date": date_str
+            }
+            with open("/tmp/undertow_sofr_cache.json", 'w') as f:
+                json.dump(cache_data, f)
+        except Exception as e:
+            print(f"  ℹ️  Could not cache SOFR: {e}", flush=True)
 
         return {
             "score": score,
@@ -1655,7 +1682,24 @@ def get_layer9():
                             "date": obs.get("date", "")
                         })
                 if len(nfci_observations) < 1:
-                    return {"score": 0, "max": 5, "flags": ["NFCI: No valid FRED observations"], "data": {}}
+                    # Try fallback: read cached NFCI value if it exists
+                    cache_file = "/tmp/undertow_nfci_cache.json"
+                    if os.path.exists(cache_file):
+                        try:
+                            with open(cache_file, 'r') as f:
+                                cached = json.load(f)
+                                nfci_value = cached.get("nfci_value")
+                                nfci_prior = cached.get("nfci_prior")
+                                anfci_value = cached.get("anfci_value")
+                                nfci_date = cached.get("nfci_date", "")
+                                if nfci_value is not None:
+                                    print(f"  ℹ️  Using cached NFCI from {nfci_date} (live data unavailable - published Wed)", flush=True)
+                                    nfci_observations = [{"value": nfci_value, "date": nfci_date}]
+                        except Exception as e:
+                            print(f"  ⚠️  Could not read NFCI cache: {e}", flush=True)
+
+                    if len(nfci_observations) < 1:
+                        return {"score": 0, "max": 5, "flags": ["NFCI: No valid FRED observations (no cache)"], "data": {}}
             except Exception as e:
                 print(f"  ⚠️  NFCI parse error: {e}", flush=True)
                 print(f"      Response text: {r_nfci.text[:300]}", flush=True)
@@ -1748,6 +1792,20 @@ def get_layer9():
                 flags.append(f"Both indices firmly negative (NFCI {nfci_value:.2f}, ANFCI {anfci_value:.2f if anfci_value else 'N/A'}) — healthy financial conditions")
 
         date_str = nfci_date if nfci_date else datetime.datetime.utcnow().strftime("%Y-%m-%d")
+
+        # Cache this successful fetch for fallback if next week's fails
+        try:
+            cache_data = {
+                "nfci_value": nfci_value,
+                "nfci_prior": nfci_prior,
+                "anfci_value": anfci_value,
+                "anfci_prior": anfci_prior,
+                "nfci_date": date_str
+            }
+            with open("/tmp/undertow_nfci_cache.json", 'w') as f:
+                json.dump(cache_data, f)
+        except Exception as e:
+            print(f"  ℹ️  Could not cache NFCI: {e}", flush=True)
 
         return {
             "score": score,
