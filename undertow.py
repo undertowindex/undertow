@@ -1478,10 +1478,13 @@ def get_layer8():
             r_vol = requests.get(url, params=params_vol, timeout=10)
         except Exception as e:
             print(f"  ⚠️  SOFR FRED API connection error: {e}", flush=True)
-            return {"score": 0, "max": 5, "flags": [f"SOFR: FRED API unreachable ({str(e)[:40]})"], "data": {}}
+            print(f"      Error type: {type(e).__name__}", flush=True)
+            # Fall through to fallback instead of returning immediately
+            r_sofr = None
+            r_vol = None
 
-        sofr_fetch_ok = r_sofr.status_code == 200
-        vol_fetch_ok = r_vol.status_code == 200
+        sofr_fetch_ok = r_sofr is not None and r_sofr.status_code == 200
+        vol_fetch_ok = r_vol is not None and r_vol.status_code == 200
 
         sofr_3m = None
         sofr_date = None
@@ -1500,10 +1503,14 @@ def get_layer8():
                         break
             except Exception as e:
                 print(f"  ⚠️  SOFR3Mfsr parse error: {e}", flush=True)
-                print(f"      Response text: {r_sofr.text[:200]}", flush=True)
+                if r_sofr is not None:
+                    print(f"      Response text: {r_sofr.text[:200]}", flush=True)
         else:
-            print(f"  ⚠️  SOFR3Mfsr fetch failed: HTTP {r_sofr.status_code}", flush=True)
-            print(f"      Response: {r_sofr.text[:200]}", flush=True)
+            if r_sofr is not None:
+                print(f"  ⚠️  SOFR3Mfsr fetch failed: HTTP {r_sofr.status_code}", flush=True)
+                print(f"      Response: {r_sofr.text[:200]}", flush=True)
+            else:
+                print(f"  ⚠️  SOFR3Mfsr fetch failed: No response object", flush=True)
 
         # Parse volume (optional - works if feed exists, skips gracefully if not)
         if vol_fetch_ok:
@@ -1517,10 +1524,14 @@ def get_layer8():
                         break
             except Exception as e:
                 print(f"  ⚠️  SOFRVOL parse error: {e}", flush=True)
-                print(f"      Response text: {r_vol.text[:200]}", flush=True)
+                if r_vol is not None:
+                    print(f"      Response text: {r_vol.text[:200]}", flush=True)
         else:
-            print(f"  ⚠️  SOFRVOL fetch failed: HTTP {r_vol.status_code} (volume stress detection disabled)", flush=True)
-            print(f"      Response: {r_vol.text[:200]}", flush=True)
+            if r_vol is not None:
+                print(f"  ⚠️  SOFRVOL fetch failed: HTTP {r_vol.status_code} (volume stress detection disabled)", flush=True)
+                print(f"      Response: {r_vol.text[:200]}", flush=True)
+            else:
+                print(f"  ⚠️  SOFRVOL fetch failed: No response object", flush=True)
 
         if sofr_3m is None:
             # Try fallback: read cached SOFR value if it exists
@@ -1669,10 +1680,13 @@ def get_layer9():
             r_anfci = requests.get(url, params=params_anfci, timeout=10)
         except Exception as e:
             print(f"  ⚠️  NFCI FRED API connection error: {e}", flush=True)
-            return {"score": 0, "max": 5, "flags": [f"NFCI: FRED API unreachable ({str(e)[:40]})"], "data": {}}
+            print(f"      Error type: {type(e).__name__}", flush=True)
+            # Fall through to fallback instead of returning immediately
+            r_nfci = None
+            r_anfci = None
 
-        nfci_fetch_ok = r_nfci.status_code == 200
-        anfci_fetch_ok = r_anfci.status_code == 200
+        nfci_fetch_ok = r_nfci is not None and r_nfci.status_code == 200
+        anfci_fetch_ok = r_anfci is not None and r_anfci.status_code == 200
 
         # Parse NFCI current and prior
         nfci_observations = []
@@ -1681,13 +1695,14 @@ def get_layer9():
                 obs_list = r_nfci.json().get("observations", [])
                 if not obs_list:
                     print(f"  ⚠️  NFCI: No observations returned from FRED (published weekly, may lag)", flush=True)
-                    return {"score": 0, "max": 5, "flags": ["NFCI: No recent FRED observations (published Wed)"], "data": {}}
-                for obs in obs_list:
-                    if obs["value"] != ".":
-                        nfci_observations.append({
-                            "value": float(obs["value"]),
-                            "date": obs.get("date", "")
-                        })
+                else:
+                    for obs in obs_list:
+                        if obs["value"] != ".":
+                            nfci_observations.append({
+                                "value": float(obs["value"]),
+                                "date": obs.get("date", "")
+                            })
+
                 if len(nfci_observations) < 1:
                     # Try fallback: read cached NFCI value if it exists
                     cache_file = "/tmp/undertow_nfci_cache.json"
@@ -1709,11 +1724,15 @@ def get_layer9():
                         return {"score": 0, "max": 5, "flags": ["NFCI: No valid FRED observations (no cache)"], "data": {}}
             except Exception as e:
                 print(f"  ⚠️  NFCI parse error: {e}", flush=True)
-                print(f"      Response text: {r_nfci.text[:300]}", flush=True)
-                return {"score": 0, "max": 5, "flags": [f"NFCI parse error: {e}"], "data": {}}
+                if r_nfci is not None:
+                    print(f"      Response text: {r_nfci.text[:300]}", flush=True)
+                # Fall through to fallback instead of returning immediately
         else:
-            print(f"  ⚠️  NFCI fetch failed: HTTP {r_nfci.status_code}", flush=True)
-            print(f"      Response: {r_nfci.text[:300]}", flush=True)
+            if r_nfci is not None:
+                print(f"  ⚠️  NFCI fetch failed: HTTP {r_nfci.status_code}", flush=True)
+                print(f"      Response: {r_nfci.text[:300]}", flush=True)
+            else:
+                print(f"  ⚠️  NFCI fetch failed: No response object", flush=True)
             # Try fallback cache before giving up
             cache_file = "/tmp/undertow_nfci_cache.json"
             if os.path.exists(cache_file):
@@ -1725,7 +1744,8 @@ def get_layer9():
                         anfci_value = cached.get("anfci_value")
                         nfci_date = cached.get("nfci_date", "")
                         if nfci_value is not None:
-                            print(f"  ℹ️  Using cached NFCI from {nfci_date} (live API failed with HTTP {r_nfci.status_code})", flush=True)
+                            http_status = r_nfci.status_code if r_nfci is not None else "connection error"
+                            print(f"  ℹ️  Using cached NFCI from {nfci_date} (live API failed: {http_status})", flush=True)
                             nfci_observations = [{"value": nfci_value, "date": nfci_date}]
                 except Exception as e:
                     print(f"  ⚠️  Could not read NFCI cache: {e}", flush=True)
@@ -1750,12 +1770,16 @@ def get_layer9():
                         })
             except Exception as e:
                 print(f"  ⚠️  ANFCI parse error: {e}", flush=True)
-                print(f"      Response text: {r_anfci.text[:300]}", flush=True)
+                if r_anfci is not None:
+                    print(f"      Response text: {r_anfci.text[:300]}", flush=True)
                 # ANFCI fetch failure is recoverable — use NFCI only
                 anfci_observations = []
         else:
-            print(f"  ⚠️  ANFCI fetch failed: HTTP {r_anfci.status_code}", flush=True)
-            print(f"      Response: {r_anfci.text[:300]}", flush=True)
+            if r_anfci is not None:
+                print(f"  ⚠️  ANFCI fetch failed: HTTP {r_anfci.status_code}", flush=True)
+                print(f"      Response: {r_anfci.text[:300]}", flush=True)
+            else:
+                print(f"  ⚠️  ANFCI fetch failed: No response object", flush=True)
             # ANFCI is optional for scoring but helps divergence detection
 
         # Extract current values
