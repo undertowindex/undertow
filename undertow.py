@@ -1250,7 +1250,7 @@ def build_data_quality_dashboard(l1, l2, l3, l3b, l3c, l3d, l3e, l8, l9=None):
     for feed_name, is_live in feeds.items():
         status = "✅ LIVE" if is_live else "❌ MISSING"
         color = "#2d7a2d" if is_live else "#a94442"
-        html_rows.append(f'<tr><td style="color: #e0e0e0; padding: 6px 8px;">{feed_name}</td><td style="color: {color}; font-weight: bold; padding: 6px 8px;">{status}</td></tr>')
+        html_rows.append(f'<tr><td style="color: #1a1a1a; font-weight: bold; padding: 6px 8px;">{feed_name}</td><td style="color: {color}; font-weight: bold; padding: 6px 8px;">{status}</td></tr>')
 
     quality_color = "#2d7a2d" if quality_pct >= 80 else "#ff9800" if quality_pct >= 60 else "#a94442"
     quality_emoji = "🟢" if quality_pct >= 80 else "🟡" if quality_pct >= 60 else "🔴"
