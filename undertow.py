@@ -1474,9 +1474,13 @@ def get_layer8():
         }
 
         # Diagnostic: check FRED API key and proxy configuration
-        from requests.utils import get_environ_proxies, select_proxy
-        print("FRED_API_KEY_present:", bool(os.getenv("FRED_API_KEY", "").strip()), flush=True)
-        print("environment_proxy_selected:", bool(select_proxy(url, get_environ_proxies(url))), flush=True)
+        fred_key_set = bool(os.getenv("FRED_API_KEY", "").strip())
+        https_proxy_set = bool(os.getenv("HTTPS_PROXY") or os.getenv("https_proxy"))
+        http_proxy_set = bool(os.getenv("HTTP_PROXY") or os.getenv("http_proxy"))
+        all_proxy_set = bool(os.getenv("ALL_PROXY") or os.getenv("all_proxy"))
+        any_proxy_set = https_proxy_set or http_proxy_set or all_proxy_set
+        print(f"FRED_API_KEY_present: {fred_key_set}", flush=True)
+        print(f"environment_proxy_set: {any_proxy_set} (HTTPS:{https_proxy_set}, HTTP:{http_proxy_set}, ALL:{all_proxy_set})", flush=True)
 
         try:
             r_sofr = requests.get(url, params=params_sofr, timeout=10)
