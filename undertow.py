@@ -1499,6 +1499,12 @@ def get_layer8():
         sofr_date = None
         volume_b = None
 
+        # Score based on SOFR rate AND volume (liquidity stress)
+        # Thresholds are DYNAMIC, tied to current Fed target rate
+        score = 0
+        status = "NORMAL"
+        flags = []
+
         # Parse SOFR 3M rate (critical feed - if missing, fail gracefully)
         if sofr_fetch_ok:
             try:
@@ -1566,12 +1572,6 @@ def get_layer8():
                 volume_b = 3000  # Assume normal volume
                 print(f"  ⚠️  SOFR: FRED API unavailable - system running on fallback defaults (not live market data)", flush=True)
                 flags.append("⚠️  SOFR using fallback (live FRED data unavailable)")
-
-        # Score based on SOFR rate AND volume (liquidity stress)
-        # Thresholds are DYNAMIC, tied to current Fed target rate
-        score = 0
-        status = "NORMAL"
-        flags = []
 
         # Dynamic thresholds from config (based on FED_TARGET_RATE environment variable)
         sofr_warning_level = SOFR_WARNING_THRESHOLD  # Fed_Target + 1.75pp
@@ -1791,6 +1791,13 @@ def get_layer9():
                 print(f"  ⚠️  ANFCI fetch failed: No response object", flush=True)
             # ANFCI is optional for scoring but helps divergence detection
 
+        # ────────────────────────────────────────────────────
+        # DUAL-INDEX SCORING LOGIC
+        # ────────────────────────────────────────────────────
+        score = 0
+        status = "CALM"
+        flags = []
+
         # Extract current values
         nfci_value = nfci_observations[0]["value"]
         nfci_date = nfci_observations[0]["date"]
@@ -1804,13 +1811,6 @@ def get_layer9():
         # Calculate spread: positive spread (NFCI > ANFCI) means economic/policy tightening
         #                  negative spread (ANFCI > NFCI) means pure institutional panic
         nfci_spread = (nfci_value - anfci_value) if anfci_value is not None else None
-
-        # ────────────────────────────────────────────────────
-        # DUAL-INDEX SCORING LOGIC
-        # ────────────────────────────────────────────────────
-        score = 0
-        status = "CALM"
-        flags = []
 
         # Check divergence: if ANFCI > NFCI, pure panic is visible
         anfci_divergence = False
