@@ -1918,7 +1918,8 @@ def format_layer9_for_email(layer9_data):
     # Index values with momentum
     lines.append(f"NFCI (105 indicators): {nfci_val:+.2f} (momentum: {nfci_momentum:+.2f})")
     if anfci_val is not None:
-        lines.append(f"ANFCI (noise-filtered):  {anfci_val:+.2f} (momentum: {anfci_momentum:+.2f if anfci_momentum is not None else 'N/A'})")
+        anfci_momentum_str = f"{anfci_momentum:+.2f}" if anfci_momentum is not None else "N/A"
+        lines.append(f"ANFCI (noise-filtered):  {anfci_val:+.2f} (momentum: {anfci_momentum_str})")
         if spread is not None:
             spread_interpretation = "panic" if spread < -0.05 else "economic/policy" if spread > 0.05 else "balanced"
             lines.append(f"Spread (NFCI-ANFCI): {spread:+.2f} ({spread_interpretation} tightening)")
