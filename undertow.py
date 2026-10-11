@@ -1473,6 +1473,11 @@ def get_layer8():
             "limit": 2  # Get 2 in case today's not published
         }
 
+        # Diagnostic: check FRED API key and proxy configuration
+        from requests.utils import get_environ_proxies, select_proxy
+        print("FRED_API_KEY_present:", bool(os.getenv("FRED_API_KEY", "").strip()), flush=True)
+        print("environment_proxy_selected:", bool(select_proxy(url, get_environ_proxies(url))), flush=True)
+
         try:
             r_sofr = requests.get(url, params=params_sofr, timeout=10)
             r_vol = requests.get(url, params=params_vol, timeout=10)
