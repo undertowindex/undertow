@@ -212,7 +212,7 @@ def get_layer1():
             }
         }
     except Exception as e:
-        return {"score": 0, "max": 5, "flags": [f"Layer 1 error: {e}"], "data": {}}
+        return {"score": 0, "max": 7, "flags": [f"Layer 1 error: {e}"], "data": {}}
 
 # ─────────────────────────────────────────────
 # LAYER 2: CREDIT & YIELD CURVE
@@ -306,7 +306,8 @@ def get_layer2():
     except Exception as e:
         flags.append(f"Layer 2 error: {e}")
 
-    return {"score": score, "max": 8, "flags": flags, "data": data}
+    # Declared max = sum of reachable points (curve 2, 10Y 2, 30Y 2, HY 2, MOVE 2, divergence 2).
+    return {"score": score, "max": 12, "flags": flags, "data": data}
 
 # ─────────────────────────────────────────────
 # LAYER 3: MACRO TREMORS
@@ -333,12 +334,14 @@ def get_layer3():
         data["yen_chg"] = round(yen_chg, 3)
         data["copper_gold_ratio"] = round(copper_gold, 6)
 
-        if yen_chg > 0.5:
+        # JPY=X is USD/JPY: a FALL means the yen is strengthening. Carry-trade
+        # unwinds happen when the yen rallies, so only a falling USD/JPY scores.
+        if yen_chg < -0.5:
             score += 2
-            flags.append(f"Yen surging {yen_chg:.2f}% — carry trade unwinding risk")
-        elif yen_chg > 0.2:
+            flags.append(f"Yen surging (USD/JPY {yen_chg:.2f}%) — carry trade unwinding risk")
+        elif yen_chg < -0.2:
             score += 1
-            flags.append(f"Yen strengthening {yen_chg:.2f}%")
+            flags.append(f"Yen strengthening (USD/JPY {yen_chg:.2f}%)")
 
         cu_gold_threshold = 0.00018
         if copper_gold < cu_gold_threshold * 0.95:
@@ -408,7 +411,7 @@ def get_layer3():
     except Exception as e:
         flags.append(f"Layer 3 error: {e}")
 
-    return {"score": score, "max": 6, "flags": flags, "data": data}
+    return {"score": score, "max": 8, "flags": flags, "data": data}
 
 # ─────────────────────────────────────────────
 # LAYER 4: COMPOSITE SCORE
@@ -856,30 +859,58 @@ def get_layer3e(chain=None):
 
     return {"score": score, "max": 2, "flags": flags, "data": data}
 
-def compute_score(l1, l2, l3, l3b, l3c, l3d, l3e, l8, l9=None):
-    # 2026-09-27: Added Layer 8 SOFR funding stress (+5 max). Max = 36.
-    # 2026-10-01: Added Layer 9 NFCI/ANFCI systemic risk (+5 max). Max = 41.
-    # Scaled thresholds from old (max=31): 10/31*36 ≈ 12, 19/31*36 ≈ 22.
-    # New thresholds with L9: 12*41/36 ≈ 14, 22*41/36 ≈ 25.
-    l9_score = l9["score"] if l9 else 0
-    total = l1["score"] + l2["score"] + l3["score"] + l3b["score"] + l3c["score"] + l3d["score"] + l3e["score"] + l8["score"] + l9_score
+CORE_LAYERS = ("Layer 1", "Layer 2", "Layer 3", "Layer 8", "Layer 9")
+_DEGRADED_MARKERS = ("error", "unavailable", "fallback", "not set", "no valid")
 
-    max_score = 41 if l9 else 36
+
+def _layer_gap(name, layer):
+    """Why a layer's data cannot be trusted, or None if it is fine."""
+    if layer is None:
+        return f"{name} not run"
+    if not layer.get("data"):
+        return f"{name} no data"
+    if any(any(m in f.lower() for m in _DEGRADED_MARKERS) for f in layer.get("flags", [])):
+        return f"{name} degraded"
+    return None
+
+
+def compute_score(l1, l2, l3, l3b, l3c, l3d, l3e, l8, l9=None):
+    # Thresholds (14 / 25) were set when max was 41. They are kept unchanged:
+    # the max now equals the sum of the layers' declared maxima (47 with L9), and
+    # thresholds should only move after a backtest.
+    layers = [("Layer 1", l1), ("Layer 2", l2), ("Layer 3", l3), ("Layer 3b", l3b),
+              ("Layer 3c", l3c), ("Layer 3d", l3d), ("Layer 3e", l3e), ("Layer 8", l8),
+              ("Layer 9", l9)]
+    layers = [(n, l) for n, l in layers if l is not None]
+    total = sum(l["score"] for _, l in layers)
+    max_score = sum(l["max"] for _, l in layers)
+
+    # A calm total is not reassuring if a core input is missing or degraded.
+    gaps = [g for g in (_layer_gap(n, l) for n, l in layers if n in CORE_LAYERS) if g]
+    if l9 is None:
+        gaps.append("Layer 9 not run")
 
     if total <= 14:
         signal = "GREEN"
-        emoji = "🟢"
         summary = "Markets calm. No significant stress signals detected."
     elif total <= 25:
         signal = "AMBER"
-        emoji = "🟡"
         summary = "Elevated risk. Multiple stress signals present. Watch closely."
     else:
         signal = "RED"
-        emoji = "🔴"
         summary = "High alert. Significant macro stress across multiple indicators."
 
-    return {"score": total, "max": max_score, "signal": signal, "emoji": emoji, "summary": summary}
+    if gaps:
+        detail = "; ".join(gaps)
+        if signal == "GREEN":
+            signal = "AMBER"
+            summary = f"Score is calm, but core data is incomplete ({detail}). Headline capped at AMBER until the inputs are live."
+        else:
+            summary += f" Data gaps: {detail}."
+
+    emoji = {"GREEN": "🟢", "AMBER": "🟡", "RED": "🔴"}[signal]
+    return {"score": total, "max": max_score, "signal": signal, "emoji": emoji,
+            "summary": summary, "data_gaps": gaps}
 
 # ─────────────────────────────────────────────
 # LAYER 5: THE BOARDROOM
@@ -1024,6 +1055,8 @@ def parse_boardroom_tally(boardroom_text):
 
 SIGNAL_LEVELS = ["GREEN", "AMBER", "RED"]
 SIGNAL_EMOJI = {"GREEN": "🟢", "AMBER": "🟡", "RED": "🔴"}
+# Off by default: the Boardroom vote is a note, not a headline override.
+BOARDROOM_CAN_OVERRIDE = os.environ.get("BOARDROOM_CAN_OVERRIDE", "0").strip() == "1"
 
 
 def apply_boardroom_override(score_data, tally):
@@ -1043,6 +1076,16 @@ def apply_boardroom_override(score_data, tally):
 
     if tally is None:
         result["override_note"] = "Boardroom tally unavailable — showing the composite score's signal only."
+        return result
+
+    # The Boardroom is an opinion. Its vote is shown as a note and does not move the
+    # headline unless BOARDROOM_CAN_OVERRIDE=1 is set, which should only happen
+    # after a backtest shows overrides improve results.
+    if not BOARDROOM_CAN_OVERRIDE:
+        result["override_note"] = (
+            f"Boardroom voted {tally['upgrade']} upgrade / {tally['confirm']} confirm / "
+            f"{tally['downgrade']} downgrade. Shown as a note only; the headline stays on the measured composite."
+        )
         return result
 
     idx = SIGNAL_LEVELS.index(base_signal)
@@ -2138,31 +2181,17 @@ def main():
         sanity_warnings.append("🎯 Trade Ideas API call FAILED — section shows the error message, not ideas.")
 
     # Shadow indicators (test mode, Sep 26 - Oct 23)
-    shadow_output = ""
-    if SHADOW_INDICATORS_AVAILABLE:
-        try:
-            print("\n[Shadow Indicators] Running three new leading indicators (test mode)...", flush=True)
-            breadth, breadth_status = fetch_breadth_indicator()
-            vix_term, vix_status = fetch_vix_term_structure()
-            qqq_ratio, qqq_status = fetch_qqq_put_call_ratio()
-            # Note: TED Spread replaced with SOFR in Layer 8 (no longer in shadow indicators)
-
-            print(f"  Market Breadth: {breadth:.1f}% [{breadth_status}]" if breadth else f"  Market Breadth: None [{breadth_status}]", flush=True)
-            print(f"  VIX Term Ratio: {vix_term:.3f} [{vix_status}]" if vix_term else f"  VIX Term Ratio: None [{vix_status}]", flush=True)
-            print(f"  QQQ Put/Call: {qqq_ratio:.2f} [{qqq_status}]" if qqq_ratio else f"  QQQ Put/Call: None [{qqq_status}]", flush=True)
-
-            shadow_output = (
-                f"\n📊 SHADOW INDICATORS (Test Period: Sep 26 — Oct 23)\n"
-                f"Market Breadth: {breadth:.1f}% [{breadth_status}]\n"
-                f"VIX Term Ratio: {vix_term:.3f} [{vix_status}]\n"
-                f"QQQ Put/Call: {qqq_ratio:.2f} [{qqq_status}]\n"
-                f"(Running in parallel — does NOT change RED/AMBER/GREEN signal until validated)"
-            ) if (breadth and vix_term and qqq_ratio) else f"Shadow indicators incomplete (one or more failed to fetch)"
-        except Exception as e:
-            print(f"  ⚠️  Shadow indicators error: {e}", flush=True)
-            shadow_output = f"Shadow indicators unavailable: {e}"
-    else:
-        shadow_output = "Shadow indicators module not loaded"
+    # Audit fix (2026-10-20): the breadth, VIX-term and QQQ put/call shadow values
+    # were synthetic (5 stocks vs $100, a fixed 0.95x VIX ratio, VIX-derived P/C).
+    # They are reported as UNAVAILABLE rather than shown as readings.
+    shadow_output = (
+        "\n📊 SHADOW INDICATORS (Test Period: Sep 26 — Oct 23)\n"
+        "Market Breadth: UNAVAILABLE (needs S&P 500 constituent data; not measured)\n"
+        "VIX Term Ratio: UNAVAILABLE (needs VIX3M or VIX futures; not measured)\n"
+        "QQQ Put/Call: UNAVAILABLE (needs QQQ option volume; not measured)\n"
+        "(Running in parallel — does NOT change RED/AMBER/GREEN signal until validated)"
+    )
+    print("  Shadow indicators: all three UNAVAILABLE (not measured)", flush=True)
 
     print("\n[Layer 9] Formatting NFCI/ANFCI for email...")
     layer9_html = format_layer9_for_email(l9)
