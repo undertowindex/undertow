@@ -3,6 +3,7 @@ import sys, os, json, tempfile, datetime
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["UNDERTOW_CACHE_DIR"] = tempfile.mkdtemp()
 os.environ.pop("FRED_API_KEY", None)
+os.environ["FED_TARGET_RATE"] = "3.875"
 import undertow_feeds as F
 import undertow as U
 
@@ -73,6 +74,20 @@ CSV2 = "Friday_of_Week,NFCI,ANFCI\n10/17/2025,0.10,0.20\n10/24/2025,0.30,0.50\n"
 requests.get = lambda url, params=None, timeout=0, headers=None: R(200, text=CSV2) if "chicagofed" in url else (_ for _ in ()).throw(OSError("x"))
 l9s = U.get_layer9()
 check("L9 WARNING scores 5 on NFCI>=0", l9s["score"] == 5 and l9s["data"]["nfci_status"] == "WARNING")
+
+# 7 scoring rule on backtested episodes (spread vs range top)
+S = F.sofr_spread_score
+check("2019-09-17 +300bp -> 5", S(5.25, 2.25)[0] == 5)
+check("2019-09-16 +18bp -> 2", S(2.43, 2.25)[0] == 2)
+check("2025-10-31 +22bp -> 2", S(4.22, 4.00)[0] == 2)
+check("2025-11-03 +13bp -> 1", S(4.13, 4.00)[0] == 1)
+check("2026-10-22 3.90 vs 4.00 -> 0", S(3.90, 4.00)[0] == 0)
+check("2023-03 4.55 vs 4.75 -> 0", S(4.55, 4.75)[0] == 0)
+check("L8 live scores 0 today (3.90 vs 4.00 top)", l8["score"] == 0 and l8["data"]["sofr_spread_bp"] == -10.0)
+requests.get = lambda url, params=None, timeout=0, headers=None: R(200, {"refRates":[{"effectiveDate":"2026-10-30","type":"SOFR","percentRate":4.22,"volumeInBillions":2800}]}) if "newyorkfed" in url else (_ for _ in ()).throw(OSError("x"))
+l8s = U.get_layer8()
+check("L8 +22bp squeeze scores CAUTION 2, volume not scored", l8s["score"] == 2 and l8s["data"]["sofr_status"] == "CAUTION")
+check("L8 email text has no stale 3.80% thresholds", "3.80" not in U.format_layer8_for_email(l8s))
 
 bad = [n for n, ok in results if not ok]
 print(f"\n{len(results)-len(bad)}/{len(results)} passed"); sys.exit(1 if bad else 0)

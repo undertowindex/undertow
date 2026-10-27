@@ -6,7 +6,7 @@ import time
 import datetime
 import requests
 import yfinance as yf
-from undertow_feeds import (fetch_sofr, fetch_nfci, read_cache, write_cache,
+from undertow_feeds import (fetch_sofr, fetch_nfci, sofr_spread_score, read_cache, write_cache,
     SOFR_CACHE, NFCI_CACHE, SOFR_CACHE_MAX_AGE_DAYS, NFCI_CACHE_MAX_AGE_DAYS)
 
 from glint_bridge import run_glint, build_glint_section
@@ -64,17 +64,13 @@ ARK_HANDOFF_GIST_ID = os.environ.get("ARK_HANDOFF_GIST_ID", "")
 
 # LAYER 8 SOFR THRESHOLDS (dynamic, calibrated to current Fed target)
 # Set FED_TARGET_RATE in environment to current Fed funds target midpoint (e.g., "4.25")
-# Thresholds calculated as: Fed_Target + spread
-# CAUTION: Fed_Target + 1.20pp (e.g., 5.45% if Fed target is 4.25%)
-# WARNING: Fed_Target + 1.75pp (e.g., 6.00% if Fed target is 4.25%)
+# Layer 8 scores SOFR against the top of the range: FED_TARGET_RATE + 0.125pp
 try:
     FED_TARGET_RATE = float(os.environ.get("FED_TARGET_RATE", "4.25").strip())
 except ValueError:
     FED_TARGET_RATE = 4.25  # Fallback to current approximate target
     print("⚠️  FED_TARGET_RATE invalid, defaulting to 4.25%", flush=True)
 
-SOFR_CAUTION_THRESHOLD = FED_TARGET_RATE + 1.20
-SOFR_WARNING_THRESHOLD = FED_TARGET_RATE + 1.75
 
 # ─────────────────────────────────────────────
 def publish_ark_handoff(ark_inputs, gist_id, token):
@@ -1490,18 +1486,15 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", g
 # ─────────────────────────────────────────────
 
 def get_layer8():
-    """SOFR Funding Stress: 3M SOFR Term Rate + Volume (NY Fed data).
+    """SOFR Funding Stress: overnight SOFR vs the top of the Fed target range.
 
-    Measures short-term funding costs AND market liquidity. Elevated rates
-    + low volume = funding squeeze (credit stress). Uses FRED API.
+    Score by spread above the range top (FED_TARGET_RATE midpoint + 0.125pp):
+    <=+5bp = 0 | +5..+15bp = 1 WATCH | +15..+30bp = 2 CAUTION | >+30bp = 5 STRESS.
+    Volume is shown for information only - the old absolute-volume trigger
+    fired on ~half of normal days (backtested) and is no longer scored.
 
-    Thresholds are DYNAMIC, calibrated to current Fed target rate:
-    - CALM: SOFR < Fed_Target + 1.00pp AND volume > 2,950B
-    - CAUTION: SOFR Fed_Target + 1.00pp to Fed_Target + 1.20pp OR volume 2,850-2,950B
-    - STRESS: SOFR >= Fed_Target + 1.75pp AND volume < 2,850B
-
-    Fed_Target is read from FED_TARGET_RATE environment variable (default 4.25%)
-    Update FED_TARGET_RATE on Railway whenever Fed changes target.
+    Update FED_TARGET_RATE on Railway (range midpoint) when the Fed moves.
+    No data = layer unavailable and unscored (never an invented value).
 
     Returns {score (0-5), max, flags, data}.
     """
@@ -1531,43 +1524,11 @@ def get_layer8():
         score = 0
         status = "NORMAL"
 
-        # Dynamic thresholds from config (based on FED_TARGET_RATE environment variable)
-        sofr_warning_level = SOFR_WARNING_THRESHOLD  # Fed_Target + 1.75pp
-        sofr_caution_level = SOFR_CAUTION_THRESHOLD  # Fed_Target + 1.20pp
-        sofr_watch_level = FED_TARGET_RATE + 1.00  # Fed_Target + 1.00pp
-
-        sofr_stress = sofr_3m >= sofr_warning_level  # SOFR critically elevated
-        sofr_caution = sofr_caution_level <= sofr_3m < sofr_warning_level  # SOFR tightening
-        sofr_watch = sofr_watch_level <= sofr_3m < sofr_caution_level  # SOFR slightly above Fed rate
-        vol_stress = volume_b is not None and volume_b < 2850  # Volume drying up
-        vol_caution = volume_b is not None and 2850 <= volume_b <= 2950
-
-        if sofr_stress and vol_stress:
-            # Both rate AND volume stressed = real funding crisis
-            score = 5
-            status = "STRESS"
-            flags.append(f"SOFR funding crisis: {sofr_3m:.2f}% (threshold {sofr_warning_level:.2f}%) + volume {volume_b:.0f}B (collapsed)")
-        elif sofr_stress or vol_stress:
-            # Either rate spiking OR volume drying up = caution
-            score = 2
-            status = "CAUTION"
-            if sofr_stress:
-                flags.append(f"SOFR critically elevated: {sofr_3m:.2f}% (≥{sofr_warning_level:.2f}% warning level)")
-            if vol_stress:
-                flags.append(f"SOFR volume stress: {volume_b:.0f}B (below 2,850 threshold)")
-        elif sofr_caution or vol_caution:
-            # Elevated but not critical = watch closely
-            score = 1
-            status = "WATCH"
-            if sofr_caution:
-                flags.append(f"SOFR elevated: {sofr_3m:.2f}% ({sofr_caution_level:.2f}%-{sofr_warning_level:.2f}% caution band)")
-            if vol_caution:
-                flags.append(f"SOFR volume elevated: {volume_b:.0f}B")
-        elif sofr_watch:
-            # Above Fed rate but not yet concerning
-            score = 0
-            status = "WATCH"
-            flags.append(f"SOFR slightly above Fed rate: {sofr_3m:.2f}% (Fed target {FED_TARGET_RATE:.2f}%)")
+        range_top = FED_TARGET_RATE + 0.125  # midpoint + half of a 25bp-wide range
+        score, status, spread_bp = sofr_spread_score(sofr_3m, range_top)
+        if score:
+            flags.append(f"SOFR {sofr_3m:.2f}% is {spread_bp:+.0f}bp above the top of the Fed range "
+                         f"({range_top:.2f}%) - funding pressure ({status})")
 
         date_str = sofr_date if sofr_date else datetime.datetime.utcnow().strftime("%Y-%m-%d")
 
@@ -1581,6 +1542,8 @@ def get_layer8():
                 "sofr_volume_b": volume_b,
                 "sofr_date": date_str,
                 "sofr_status": status,
+                "sofr_spread_bp": round(spread_bp, 1),
+                "sofr_range_top": range_top,
                 "sofr_source": source
             }
         }
@@ -1808,9 +1771,11 @@ def format_layer8_for_email(layer8_data):
     status = data.get("sofr_status", "UNKNOWN")
 
     lines = ["📊 SOFR FUNDING STRESS — NY FED CREDIT INDICATOR", ""]
-    lines.append(f"SOFR 3M Term Rate: {sofr_pct:.2f}%")
+    lines.append(f"SOFR (overnight): {sofr_pct:.2f}%")
+    if data.get("sofr_spread_bp") is not None:
+        lines.append(f"Vs top of Fed range ({data.get('sofr_range_top', 0):.2f}%): {data['sofr_spread_bp']:+.0f}bp")
     if volume_b is not None:
-        lines.append(f"SOFR Trading Volume: ${volume_b:.0f}B")
+        lines.append(f"SOFR Trading Volume: ${volume_b:.0f}B (information only, not scored)")
     lines.append(f"Date: {date_str}")
     lines.append("")
 
@@ -1830,7 +1795,7 @@ def format_layer8_for_email(layer8_data):
 
     # Add context: show thresholds for transparency
     lines.append("")
-    lines.append("Thresholds: CALM (SOFR<3.80% + Vol>2,950B) | CAUTION (SOFR 3.80-3.90% OR Vol 2,850-2,950B) | STRESS (SOFR>3.90% + Vol<2,850B)")
+    lines.append("Scoring: spread of SOFR above the top of the Fed target range. <=+5bp calm | +5 to +15bp watch | +15 to +30bp caution | >+30bp stress")
 
     return "\n".join(lines)
 

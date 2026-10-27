@@ -69,41 +69,58 @@ def _fred_obs(series_id, key, limit=3, timeout=8):
 # ── SOFR ─────────────────────────────────────────────────────────────
 
 def fetch_sofr(fred_key=""):
-    """Latest SOFR. Returns (data dict or None, errors list).
+    """Latest overnight SOFR. Returns (data dict or None, errors list).
 
     data = {"rate": pct, "volume_b": billions or None, "date": ISO, "source": str}
-    FRED (3M term series) is tried first, then the NY Fed's own API (overnight
-    SOFR + volume). The source is recorded because they are different series.
+    The NY Fed's own API is tried first, then FRED's overnight "SOFR" series.
+    Both are overnight SOFR, which is the series the scoring rule was tested on.
     """
     errors = []
+    r, err = _get(NYFED_SOFR_URL)
+    if r is None:
+        errors.append(f"NY Fed SOFR: {err}")
+    else:
+        try:
+            for row in r.json().get("refRates", []):  # newest first
+                if row.get("type", "SOFR") != "SOFR" or row.get("percentRate") is None:
+                    continue
+                vol = row.get("volumeInBillions")
+                return ({"rate": float(row["percentRate"]),
+                         "date": row.get("effectiveDate", ""),
+                         "volume_b": float(vol) if vol is not None else None,
+                         "source": "NY Fed (overnight SOFR)"}, errors)
+            errors.append("NY Fed SOFR: no usable rows")
+        except Exception as e:
+            errors.append(f"NY Fed SOFR parse error: {e}")
+
     if fred_key:
-        rate, err = _fred_obs("SOFR3Mfsr", fred_key, limit=2)
+        rate, err = _fred_obs("SOFR", fred_key, limit=2)
         if rate:
             vol, _ = _fred_obs("SOFRVOL", fred_key, limit=2)
             return ({"rate": rate[0]["value"], "date": rate[0]["date"],
                      "volume_b": vol[0]["value"] if vol else None,
-                     "source": "FRED (3M term SOFR)"}, errors)
+                     "source": "FRED (overnight SOFR)"}, errors)
         errors.append(f"FRED SOFR: {err}")
     else:
         errors.append("FRED SOFR: no API key")
-
-    r, err = _get(NYFED_SOFR_URL)
-    if r is None:
-        errors.append(f"NY Fed SOFR: {err}")
-        return None, errors
-    try:
-        for row in r.json().get("refRates", []):  # newest first
-            if row.get("type", "SOFR") != "SOFR" or row.get("percentRate") is None:
-                continue
-            vol = row.get("volumeInBillions")
-            return ({"rate": float(row["percentRate"]),
-                     "date": row.get("effectiveDate", ""),
-                     "volume_b": float(vol) if vol is not None else None,
-                     "source": "NY Fed (overnight SOFR)"}, errors)
-        errors.append("NY Fed SOFR: no usable rows")
-    except Exception as e:
-        errors.append(f"NY Fed SOFR parse error: {e}")
     return None, errors
+
+
+def sofr_spread_score(sofr_pct, range_top_pct):
+    """Score funding stress as SOFR's distance above the TOP of the Fed's target range.
+
+    Backtested on real NY Fed data (Sep 2019, Mar 2023, Oct-Nov 2025, Dec 2025,
+    Sep-Oct 2026): flags the 2019 and Oct-2025 squeezes, stays at 0 on normal days.
+    Returns (score 0-5, status, spread_bp).
+    """
+    bp = (sofr_pct - range_top_pct) * 100
+    if bp > 30:
+        return 5, "STRESS", bp
+    if bp > 15:
+        return 2, "CAUTION", bp
+    if bp > 5:
+        return 1, "WATCH", bp
+    return 0, "NORMAL", bp
 
 
 # ── NFCI / ANFCI ─────────────────────────────────────────────────────
