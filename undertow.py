@@ -6,6 +6,8 @@ import time
 import datetime
 import requests
 import yfinance as yf
+from undertow_feeds import (fetch_sofr, fetch_nfci, read_cache, write_cache,
+    SOFR_CACHE, NFCI_CACHE, SOFR_CACHE_MAX_AGE_DAYS, NFCI_CACHE_MAX_AGE_DAYS)
 
 from glint_bridge import run_glint, build_glint_section
 from boardroom_research import (
@@ -1263,6 +1265,15 @@ def generate_dials_dashboard(score_data, l1, l2, l3, l3b, l3c, l3d, l3e, l8, l9=
     return dials_html
 
 
+
+def _feed_state(layer, key, source_key):
+    """True = live reading, "cached" = recent saved reading, False = missing.
+    A value is only LIVE if its source says so - presence alone is not enough."""
+    data = (layer or {}).get("data", {}) or {}
+    if data.get(key) is None:
+        return False
+    return "cached" if data.get(source_key) == "cache" else True
+
 def build_data_quality_dashboard(l1, l2, l3, l3b, l3c, l3d, l3e, l8, l9=None):
     """
     Build a data quality dashboard showing which feeds are live and which are missing.
@@ -1276,23 +1287,27 @@ def build_data_quality_dashboard(l1, l2, l3, l3b, l3c, l3d, l3e, l8, l9=None):
         "Layer 3c (Put/Call)": bool(l3c.get("data")),
         "Layer 3d (SKEW)": bool(l3d.get("data")),
         "Layer 3e (Dealer Gamma)": bool(l3e.get("data")),
-        "Layer 8 SOFR Rate": bool(l8.get("data", {}).get("sofr_3m_pct")),
-        "Layer 8 SOFR Volume": bool(l8.get("data", {}).get("sofr_volume_b")),
+        "Layer 8 SOFR Rate": _feed_state(l8, "sofr_3m_pct", "sofr_source"),
+        "Layer 8 SOFR Volume": _feed_state(l8, "sofr_volume_b", "sofr_source"),
     }
 
     # Add Layer 9 if available
     if l9:
-        feeds["Layer 9 NFCI"] = bool(l9.get("data", {}).get("nfci_value"))
-        feeds["Layer 9 ANFCI"] = bool(l9.get("data", {}).get("anfci_value"))
+        feeds["Layer 9 NFCI"] = _feed_state(l9, "nfci_value", "nfci_source")
+        feeds["Layer 9 ANFCI"] = _feed_state(l9, "anfci_value", "nfci_source")
 
-    live_feeds = sum(1 for v in feeds.values() if v)
+    live_feeds = sum(1 for v in feeds.values() if v is True)
     total_feeds = len(feeds)
     quality_pct = int((live_feeds / total_feeds) * 100)
 
     html_rows = []
     for feed_name, is_live in feeds.items():
-        status = "✅ LIVE" if is_live else "❌ MISSING"
-        color = "#2d7a2d" if is_live else "#a94442"
+        if is_live is True:
+            status, color = "✅ LIVE", "#2d7a2d"
+        elif is_live == "cached":
+            status, color = "🟡 CACHED (live source unreachable)", "#ff9800"
+        else:
+            status, color = "❌ MISSING", "#a94442"
         html_rows.append(f'<tr><td style="color: #1a1a1a; font-weight: bold; padding: 6px 8px;">{feed_name}</td><td style="color: {color}; font-weight: bold; padding: 6px 8px;">{status}</td></tr>')
 
     quality_color = "#2d7a2d" if quality_pct >= 80 else "#ff9800" if quality_pct >= 60 else "#a94442"
@@ -1492,129 +1507,29 @@ def get_layer8():
     """
     try:
         fred_key = os.environ.get("FRED_API_KEY", "").strip()
-        if not fred_key:
-            return {"score": 0, "max": 5, "flags": ["SOFR: FRED_API_KEY not set"], "data": {}}
+        live, errors = fetch_sofr(fred_key)
+        flags = []
+        if live:
+            sofr_3m, sofr_date = live["rate"], live["date"]
+            volume_b, source = live["volume_b"], live["source"]
+            write_cache(SOFR_CACHE, live)
+        else:
+            for e in errors:
+                print(f"  ⚠️  {e}", flush=True)
+            cached, age = read_cache(SOFR_CACHE, SOFR_CACHE_MAX_AGE_DAYS)
+            if not cached:
+                # Never invent a reading. No data = not scored, and the
+                # composite caps a GREEN headline at AMBER (see _layer_gap).
+                return {"score": 0, "max": 5,
+                        "flags": ["SOFR unavailable: no live source reachable and no recent cache (not scored). "
+                                  + "; ".join(errors)],
+                        "data": {}}
+            sofr_3m, sofr_date = cached["rate"], cached["date"]
+            volume_b, source = cached.get("volume_b"), "cache"
+            flags.append(f"SOFR CACHED reading from {sofr_date} ({age:.1f} days old); live sources unreachable")
 
-        # Fetch 3-Month SOFR Term Rate + Volume from FRED
-        url = "https://api.stlouisfed.org/fred/series/observations"
-
-        # SOFR 3M Term Rate (from NY Fed, via FRED)
-        params_sofr = {
-            "series_id": "SOFR3Mfsr",
-            "api_key": fred_key,
-            "file_type": "json",
-            "sort_order": "desc",
-            "limit": 2  # Get 2 in case today's not published yet
-        }
-
-        # SOFR Volume (billions, from FRED) - often lags by 1-2 days
-        params_vol = {
-            "series_id": "SOFRVOL",
-            "api_key": fred_key,
-            "file_type": "json",
-            "sort_order": "desc",
-            "limit": 2  # Get 2 in case today's not published
-        }
-
-        # Diagnostic: check FRED API key and proxy configuration
-        fred_key_set = bool(os.getenv("FRED_API_KEY", "").strip())
-        https_proxy_set = bool(os.getenv("HTTPS_PROXY") or os.getenv("https_proxy"))
-        http_proxy_set = bool(os.getenv("HTTP_PROXY") or os.getenv("http_proxy"))
-        all_proxy_set = bool(os.getenv("ALL_PROXY") or os.getenv("all_proxy"))
-        any_proxy_set = https_proxy_set or http_proxy_set or all_proxy_set
-        print(f"FRED_API_KEY_present: {fred_key_set}", flush=True)
-        print(f"environment_proxy_set: {any_proxy_set} (HTTPS:{https_proxy_set}, HTTP:{http_proxy_set}, ALL:{all_proxy_set})", flush=True)
-
-        try:
-            r_sofr = requests.get(url, params=params_sofr, timeout=10)
-            r_vol = requests.get(url, params=params_vol, timeout=10)
-        except Exception as e:
-            print(f"  ⚠️  SOFR FRED API connection error: {e}", flush=True)
-            print(f"      Error type: {type(e).__name__}", flush=True)
-            # Fall through to fallback instead of returning immediately
-            r_sofr = None
-            r_vol = None
-
-        sofr_fetch_ok = r_sofr is not None and r_sofr.status_code == 200
-        vol_fetch_ok = r_vol is not None and r_vol.status_code == 200
-
-        sofr_3m = None
-        sofr_date = None
-        volume_b = None
-
-        # Score based on SOFR rate AND volume (liquidity stress)
-        # Thresholds are DYNAMIC, tied to current Fed target rate
         score = 0
         status = "NORMAL"
-        flags = []
-
-        # Parse SOFR 3M rate (critical feed - if missing, fail gracefully)
-        if sofr_fetch_ok:
-            try:
-                obs_list = r_sofr.json().get("observations", [])
-                if not obs_list:
-                    print(f"  ⚠️  SOFR3Mfsr: No observations returned from FRED", flush=True)
-                for obs in obs_list:
-                    if obs["value"] != ".":
-                        sofr_3m = float(obs["value"])
-                        sofr_date = obs.get("date", "")
-                        break
-            except Exception as e:
-                print(f"  ⚠️  SOFR3Mfsr parse error: {e}", flush=True)
-                if r_sofr is not None:
-                    print(f"      Response text: {r_sofr.text[:200]}", flush=True)
-        else:
-            if r_sofr is not None:
-                print(f"  ⚠️  SOFR3Mfsr fetch failed: HTTP {r_sofr.status_code}", flush=True)
-                print(f"      Response: {r_sofr.text[:200]}", flush=True)
-            else:
-                print(f"  ⚠️  SOFR3Mfsr fetch failed: No response object", flush=True)
-
-        # Parse volume (optional - works if feed exists, skips gracefully if not)
-        if vol_fetch_ok:
-            try:
-                obs_list = r_vol.json().get("observations", [])
-                if not obs_list:
-                    print(f"  ⚠️  SOFRVOL: No observations returned from FRED (data may lag 1-2 days)", flush=True)
-                for obs in obs_list:
-                    if obs["value"] != ".":
-                        volume_b = float(obs["value"])
-                        break
-            except Exception as e:
-                print(f"  ⚠️  SOFRVOL parse error: {e}", flush=True)
-                if r_vol is not None:
-                    print(f"      Response text: {r_vol.text[:200]}", flush=True)
-        else:
-            if r_vol is not None:
-                print(f"  ⚠️  SOFRVOL fetch failed: HTTP {r_vol.status_code} (volume stress detection disabled)", flush=True)
-                print(f"      Response: {r_vol.text[:200]}", flush=True)
-            else:
-                print(f"  ⚠️  SOFRVOL fetch failed: No response object", flush=True)
-
-        if sofr_3m is None:
-            # Try fallback: read cached SOFR value if it exists
-            cache_file = "/tmp/undertow_sofr_cache.json"
-            if os.path.exists(cache_file):
-                try:
-                    with open(cache_file, 'r') as f:
-                        cached = json.load(f)
-                        sofr_3m = cached.get("sofr_3m_pct")
-                        sofr_date = cached.get("sofr_date", "")
-                        volume_b = cached.get("sofr_volume_b")
-                        if sofr_3m is not None:
-                            print(f"  ℹ️  Using cached SOFR from {sofr_date} (live data unavailable)", flush=True)
-                except Exception as e:
-                    print(f"  ⚠️  Could not read SOFR cache: {e}", flush=True)
-
-            # If still no data, use a sensible default based on Fed target rate
-            # This prevents the system from returning missing data on first FRED failure
-            if sofr_3m is None:
-                print(f"  ℹ️  No SOFR cache available; using Fed target rate ({FED_TARGET_RATE:.2f}%) as fallback", flush=True)
-                sofr_3m = FED_TARGET_RATE  # Fallback to Fed target rate
-                sofr_date = datetime.datetime.utcnow().strftime("%Y-%m-%d")
-                volume_b = 3000  # Assume normal volume
-                print(f"  ⚠️  SOFR: FRED API unavailable - system running on fallback defaults (not live market data)", flush=True)
-                flags.append("⚠️  SOFR using fallback (live FRED data unavailable)")
 
         # Dynamic thresholds from config (based on FED_TARGET_RATE environment variable)
         sofr_warning_level = SOFR_WARNING_THRESHOLD  # Fed_Target + 1.75pp
@@ -1656,17 +1571,6 @@ def get_layer8():
 
         date_str = sofr_date if sofr_date else datetime.datetime.utcnow().strftime("%Y-%m-%d")
 
-        # Cache this successful fetch for fallback if tomorrow's fails
-        try:
-            cache_data = {
-                "sofr_3m_pct": sofr_3m,
-                "sofr_volume_b": volume_b,
-                "sofr_date": date_str
-            }
-            with open("/tmp/undertow_sofr_cache.json", 'w') as f:
-                json.dump(cache_data, f)
-        except Exception as e:
-            print(f"  ℹ️  Could not cache SOFR: {e}", flush=True)
 
         return {
             "score": score,
@@ -1676,7 +1580,8 @@ def get_layer8():
                 "sofr_3m_pct": sofr_3m,
                 "sofr_volume_b": volume_b,
                 "sofr_date": date_str,
-                "sofr_status": status
+                "sofr_status": status,
+                "sofr_source": source
             }
         }
     except Exception as e:
@@ -1704,135 +1609,28 @@ def get_layer9():
     """
     try:
         fred_key = os.environ.get("FRED_API_KEY", "").strip()
-        if not fred_key:
-            return {"score": 0, "max": 5, "flags": ["NFCI: FRED_API_KEY not set"], "data": {}}
-
-        url = "https://api.stlouisfed.org/fred/series/observations"
-
-        # Fetch NFCI — need 2 recent observations (current + prior week)
-        params_nfci = {
-            "series_id": "NFCI",
-            "api_key": fred_key,
-            "file_type": "json",
-            "sort_order": "desc",
-            "limit": 3  # Get 3 to handle if latest isn't published yet
-        }
-
-        # Fetch ANFCI — need 2 recent observations for divergence detection
-        params_anfci = {
-            "series_id": "ANFCI",
-            "api_key": fred_key,
-            "file_type": "json",
-            "sort_order": "desc",
-            "limit": 3  # Get 3 to handle if latest isn't published yet
-        }
-
-        try:
-            r_nfci = requests.get(url, params=params_nfci, timeout=10)
-            r_anfci = requests.get(url, params=params_anfci, timeout=10)
-        except Exception as e:
-            print(f"  ⚠️  NFCI FRED API connection error: {e}", flush=True)
-            print(f"      Error type: {type(e).__name__}", flush=True)
-            # Fall through to fallback instead of returning immediately
-            r_nfci = None
-            r_anfci = None
-
-        nfci_fetch_ok = r_nfci is not None and r_nfci.status_code == 200
-        anfci_fetch_ok = r_anfci is not None and r_anfci.status_code == 200
-
-        # Parse NFCI current and prior
-        nfci_observations = []
-        if nfci_fetch_ok:
-            try:
-                obs_list = r_nfci.json().get("observations", [])
-                if not obs_list:
-                    print(f"  ⚠️  NFCI: No observations returned from FRED (published weekly, may lag)", flush=True)
-                else:
-                    for obs in obs_list:
-                        if obs["value"] != ".":
-                            nfci_observations.append({
-                                "value": float(obs["value"]),
-                                "date": obs.get("date", "")
-                            })
-
-                if len(nfci_observations) < 1:
-                    # Try fallback: read cached NFCI value if it exists
-                    cache_file = "/tmp/undertow_nfci_cache.json"
-                    if os.path.exists(cache_file):
-                        try:
-                            with open(cache_file, 'r') as f:
-                                cached = json.load(f)
-                                nfci_value = cached.get("nfci_value")
-                                nfci_prior = cached.get("nfci_prior")
-                                anfci_value = cached.get("anfci_value")
-                                nfci_date = cached.get("nfci_date", "")
-                                if nfci_value is not None:
-                                    print(f"  ℹ️  Using cached NFCI from {nfci_date} (live data unavailable - published Wed)", flush=True)
-                                    nfci_observations = [{"value": nfci_value, "date": nfci_date}]
-                        except Exception as e:
-                            print(f"  ⚠️  Could not read NFCI cache: {e}", flush=True)
-
-                    if len(nfci_observations) < 1:
-                        return {"score": 0, "max": 5, "flags": ["NFCI: No valid FRED observations (no cache)"], "data": {}}
-            except Exception as e:
-                print(f"  ⚠️  NFCI parse error: {e}", flush=True)
-                if r_nfci is not None:
-                    print(f"      Response text: {r_nfci.text[:300]}", flush=True)
-                # Fall through to fallback instead of returning immediately
+        live, errors = fetch_nfci(fred_key)
+        cached_note = None
+        if live:
+            rows, source = live["rows"], live["source"]
+            write_cache(NFCI_CACHE, live)
         else:
-            if r_nfci is not None:
-                print(f"  ⚠️  NFCI fetch failed: HTTP {r_nfci.status_code}", flush=True)
-                print(f"      Response: {r_nfci.text[:300]}", flush=True)
-            else:
-                print(f"  ⚠️  NFCI fetch failed: No response object", flush=True)
-            # Try fallback cache before giving up
-            cache_file = "/tmp/undertow_nfci_cache.json"
-            if os.path.exists(cache_file):
-                try:
-                    with open(cache_file, 'r') as f:
-                        cached = json.load(f)
-                        nfci_value = cached.get("nfci_value")
-                        nfci_prior = cached.get("nfci_prior")
-                        anfci_value = cached.get("anfci_value")
-                        nfci_date = cached.get("nfci_date", "")
-                        if nfci_value is not None:
-                            http_status = r_nfci.status_code if r_nfci is not None else "connection error"
-                            print(f"  ℹ️  Using cached NFCI from {nfci_date} (live API failed: {http_status})", flush=True)
-                            nfci_observations = [{"value": nfci_value, "date": nfci_date}]
-                except Exception as e:
-                    print(f"  ⚠️  Could not read NFCI cache: {e}", flush=True)
+            for e in errors:
+                print(f"  ⚠️  {e}", flush=True)
+            cached, age = read_cache(NFCI_CACHE, NFCI_CACHE_MAX_AGE_DAYS)
+            if not cached:
+                # Never invent a reading (the old -0.20 'neutral' default is gone).
+                return {"score": 0, "max": 5,
+                        "flags": ["NFCI unavailable: no live source reachable and no recent cache (not scored). "
+                                  + "; ".join(errors)],
+                        "data": {}}
+            rows, source = cached["rows"], "cache"
+            cached_note = (f"NFCI CACHED reading from {rows[0]['date']} ({age:.1f} days old); "
+                           "live sources unreachable")
 
-            if len(nfci_observations) < 1:
-                # If still no data, use a neutral fallback and allow system to continue
-                print(f"  ⚠️  NFCI: FRED API unavailable - using neutral fallback (NFCI = -0.20)", flush=True)
-                nfci_observations = [{"value": -0.20, "date": datetime.datetime.utcnow().strftime("%Y-%m-%d")}]
-
-        # Parse ANFCI current and prior
-        anfci_observations = []
-        if anfci_fetch_ok:
-            try:
-                obs_list = r_anfci.json().get("observations", [])
-                if not obs_list:
-                    print(f"  ⚠️  ANFCI: No observations returned from FRED (may lag NFCI)", flush=True)
-                for obs in obs_list:
-                    if obs["value"] != ".":
-                        anfci_observations.append({
-                            "value": float(obs["value"]),
-                            "date": obs.get("date", "")
-                        })
-            except Exception as e:
-                print(f"  ⚠️  ANFCI parse error: {e}", flush=True)
-                if r_anfci is not None:
-                    print(f"      Response text: {r_anfci.text[:300]}", flush=True)
-                # ANFCI fetch failure is recoverable — use NFCI only
-                anfci_observations = []
-        else:
-            if r_anfci is not None:
-                print(f"  ⚠️  ANFCI fetch failed: HTTP {r_anfci.status_code}", flush=True)
-                print(f"      Response: {r_anfci.text[:300]}", flush=True)
-            else:
-                print(f"  ⚠️  ANFCI fetch failed: No response object", flush=True)
-            # ANFCI is optional for scoring but helps divergence detection
+        nfci_observations = [{"value": r["nfci"], "date": r["date"]} for r in rows]
+        anfci_observations = [{"value": r["anfci"], "date": r["date"]}
+                              for r in rows if r.get("anfci") is not None]
 
         # ────────────────────────────────────────────────────
         # DUAL-INDEX SCORING LOGIC
@@ -1840,6 +1638,8 @@ def get_layer9():
         score = 0
         status = "CALM"
         flags = []
+        if cached_note:
+            flags.append(cached_note)
 
         # Extract current values
         nfci_value = nfci_observations[0]["value"]
@@ -1896,19 +1696,6 @@ def get_layer9():
 
         date_str = nfci_date if nfci_date else datetime.datetime.utcnow().strftime("%Y-%m-%d")
 
-        # Cache this successful fetch for fallback if next week's fails
-        try:
-            cache_data = {
-                "nfci_value": nfci_value,
-                "nfci_prior": nfci_prior,
-                "anfci_value": anfci_value,
-                "anfci_prior": anfci_prior,
-                "nfci_date": date_str
-            }
-            with open("/tmp/undertow_nfci_cache.json", 'w') as f:
-                json.dump(cache_data, f)
-        except Exception as e:
-            print(f"  ℹ️  Could not cache NFCI: {e}", flush=True)
 
         return {
             "score": score,
@@ -1925,7 +1712,8 @@ def get_layer9():
                 "anfci_divergence": anfci_divergence,
                 "anfci_accelerating": anfci_accelerating,
                 "nfci_date": date_str,
-                "nfci_status": status
+                "nfci_status": status,
+                "nfci_source": source
             }
         }
     except Exception as e:
