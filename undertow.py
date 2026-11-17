@@ -613,7 +613,9 @@ def run_sanity_checks(l1, l2, l3, l3b, l3c, l3d, l3e, l8, l9=None):
         anfci_val = l9["data"].get("anfci_value")
         if anfci_val is not None and not (-2 <= anfci_val <= 2):
             warnings.append(f"Layer 9 sanity: ANFCI {anfci_val:.2f} outside plausible range (-2 to 2)")
-        _check_freshness(warnings, "Layer 9 (NFCI)", l9["data"].get("nfci_date"), max_age_days=7)
+        # NFCI is weekly: dated Friday, published Wednesday. On a Tuesday the newest
+        # published value is normally 11 days old, so the limit is 12 days.
+        _check_freshness(warnings, "Layer 9 (NFCI)", l9["data"].get("nfci_date"), max_age_days=12)
 
     layer_list = [("Layer 1", l1), ("Layer 2", l2), ("Layer 3", l3), ("Layer 3b", l3b), ("Layer 3c", l3c), ("Layer 3d", l3d), ("Layer 3e", l3e), ("Layer 8", l8)]
     if l9:
@@ -1498,9 +1500,12 @@ def get_layer8():
         # Fetch 3-Month SOFR Term Rate + Volume from FRED
         url = "https://api.stlouisfed.org/fred/series/observations"
 
-        # SOFR 3M Term Rate (from NY Fed, via FRED)
+        # SOFR overnight rate (NY Fed, daily, via FRED). Changed from "SOFR3Mfsr" on
+        # 2026-11-17: no FRED series of that name could be found, and the stale
+        # cache (dated 2026-11-05) was being used in its place. Thresholds are set
+        # against the Fed target, the right comparison for the overnight rate.
         params_sofr = {
-            "series_id": "SOFR3Mfsr",
+            "series_id": "SOFR",
             "api_key": fred_key,
             "file_type": "json",
             "sort_order": "desc",
@@ -1603,6 +1608,9 @@ def get_layer8():
                         volume_b = cached.get("sofr_volume_b")
                         if sofr_3m is not None:
                             print(f"  ℹ️  Using cached SOFR from {sofr_date} (live data unavailable)", flush=True)
+                            # Silent cache reads let a stale value score as GREEN. Flag it so
+                            # the headline is capped and the warning is visible.
+                            flags.append(f"⚠️  SOFR using cached value from {sofr_date} (live FRED unavailable)")
                 except Exception as e:
                     print(f"  ⚠️  Could not read SOFR cache: {e}", flush=True)
 
