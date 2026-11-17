@@ -40,6 +40,12 @@ def yf_download_with_retry(tickers, retries=3, backoff_seconds=3, **kwargs):
                 time.sleep(backoff_seconds * attempt)
     raise last_error
 
+
+def _close_series(df):
+    """Close prices as a 1-D series. Newer yfinance returns a per-ticker table even for one ticker."""
+    close = df["Close"]
+    return close.iloc[:, 0] if hasattr(close, "columns") else close
+
 # ─────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────
@@ -272,7 +278,7 @@ def get_layer2():
         try:
             move_data = yf_download_with_retry("^MOVE", period="1d", interval="1d")
             if not move_data.empty:
-                move = float(move_data["Close"].iloc[-1])
+                move = float(_close_series(move_data).dropna().iloc[-1])
                 data["move_index"] = round(move, 2)
                 if move > 150:
                     score += 2
@@ -1270,31 +1276,60 @@ def build_data_quality_dashboard(l1, l2, l3, l3b, l3c, l3d, l3e, l8, l9=None):
     Build a data quality dashboard showing which feeds are live and which are missing.
     Returns HTML block and a data quality score (0-100, higher is better).
     """
+    def _age_days(date_str):
+        try:
+            return (datetime.datetime.now() - datetime.datetime.strptime(date_str, "%Y-%m-%d")).days
+        except (TypeError, ValueError):
+            return None
+
+    def _feed_state(has_value, date_str=None, max_age=None, flags=()):
+        # A value alone is not LIVE: a cached or stale value must say so.
+        if not has_value:
+            return "MISSING"
+        if any("cached" in f.lower() or "fallback" in f.lower() for f in flags):
+            return "CACHED"
+        if max_age is not None:
+            age = _age_days(date_str)
+            if age is None or age > max_age:
+                return "STALE"
+        return "LIVE"
+
+    l8_data = l8.get("data", {})
+    l8_flags = l8.get("flags", [])
+    l8_date = l8_data.get("sofr_date")
     feeds = {
-        "Layer 1 (Equity)": bool(l1.get("data")),
-        "Layer 2 (Credit/Yield)": bool(l2.get("data")),
-        "Layer 3 (Macro)": bool(l3.get("data")),
-        "Layer 3b (COT/Repo)": bool(l3b.get("data")),
-        "Layer 3c (Put/Call)": bool(l3c.get("data")),
-        "Layer 3d (SKEW)": bool(l3d.get("data")),
-        "Layer 3e (Dealer Gamma)": bool(l3e.get("data")),
-        "Layer 8 SOFR Rate": bool(l8.get("data", {}).get("sofr_3m_pct")),
-        "Layer 8 SOFR Volume": bool(l8.get("data", {}).get("sofr_volume_b")),
+        "Layer 1 (Equity)": "LIVE" if l1.get("data") else "MISSING",
+        "Layer 2 (Credit/Yield)": "LIVE" if l2.get("data") else "MISSING",
+        "Layer 3 (Macro)": "LIVE" if l3.get("data") else "MISSING",
+        "Layer 3b (COT/Repo)": "LIVE" if l3b.get("data") else "MISSING",
+        "Layer 3c (Put/Call)": "LIVE" if l3c.get("data") else "MISSING",
+        "Layer 3d (SKEW)": "LIVE" if l3d.get("data") else "MISSING",
+        "Layer 3e (Dealer Gamma)": "LIVE" if l3e.get("data") else "MISSING",
+        "Layer 8 SOFR Rate": _feed_state(bool(l8_data.get("sofr_3m_pct")), l8_date, 5, l8_flags),
+        "Layer 8 SOFR Volume": _feed_state(bool(l8_data.get("sofr_volume_b")), l8_date, 5, l8_flags),
     }
 
-    # Add Layer 9 if available
+    # Add Layer 9 if available (NFCI is weekly: 12-day limit)
     if l9:
-        feeds["Layer 9 NFCI"] = bool(l9.get("data", {}).get("nfci_value"))
-        feeds["Layer 9 ANFCI"] = bool(l9.get("data", {}).get("anfci_value"))
+        l9_data = l9.get("data", {})
+        l9_flags = l9.get("flags", [])
+        l9_date = l9_data.get("nfci_date")
+        feeds["Layer 9 NFCI"] = _feed_state(bool(l9_data.get("nfci_value")), l9_date, 12, l9_flags)
+        feeds["Layer 9 ANFCI"] = _feed_state(bool(l9_data.get("anfci_value")), l9_date, 12, l9_flags)
 
-    live_feeds = sum(1 for v in feeds.values() if v)
+    live_feeds = sum(1 for s in feeds.values() if s == "LIVE")
     total_feeds = len(feeds)
     quality_pct = int((live_feeds / total_feeds) * 100)
 
+    style = {
+        "LIVE": ("✅ LIVE", "#2d7a2d"),
+        "CACHED": ("⚠️ CACHED", "#ff9800"),
+        "STALE": ("⚠️ STALE", "#ff9800"),
+        "MISSING": ("❌ MISSING", "#a94442"),
+    }
     html_rows = []
-    for feed_name, is_live in feeds.items():
-        status = "✅ LIVE" if is_live else "❌ MISSING"
-        color = "#2d7a2d" if is_live else "#a94442"
+    for feed_name, state in feeds.items():
+        status, color = style[state]
         html_rows.append(f'<tr><td style="color: #1a1a1a; font-weight: bold; padding: 6px 8px;">{feed_name}</td><td style="color: {color}; font-weight: bold; padding: 6px 8px;">{status}</td></tr>')
 
     quality_color = "#2d7a2d" if quality_pct >= 80 else "#ff9800" if quality_pct >= 60 else "#a94442"
@@ -1710,6 +1745,7 @@ def get_layer9():
 
     Returns {score (0-5), max, flags, data with validation details}.
     """
+    flags = []  # defined before any cache/fallback branch appends to it
     try:
         fred_key = os.environ.get("FRED_API_KEY", "").strip()
         if not fred_key:
@@ -1775,7 +1811,7 @@ def get_layer9():
                                 anfci_value = cached.get("anfci_value")
                                 nfci_date = cached.get("nfci_date", "")
                                 if nfci_value is not None:
-                                    print(f"  ℹ️  Using cached NFCI from {nfci_date} (live data unavailable - published Wed)", flush=True)
+                                    print(f"  ℹ️  Using cached NFCI from {nfci_date} (live data unavailable - published Wed)", flush=True); flags.append(f"⚠️  NFCI using cached value from {nfci_date} (live FRED unavailable)")
                                     nfci_observations = [{"value": nfci_value, "date": nfci_date}]
                         except Exception as e:
                             print(f"  ⚠️  Could not read NFCI cache: {e}", flush=True)
@@ -1805,7 +1841,7 @@ def get_layer9():
                         nfci_date = cached.get("nfci_date", "")
                         if nfci_value is not None:
                             http_status = r_nfci.status_code if r_nfci is not None else "connection error"
-                            print(f"  ℹ️  Using cached NFCI from {nfci_date} (live API failed: {http_status})", flush=True)
+                            print(f"  ℹ️  Using cached NFCI from {nfci_date} (live API failed: {http_status})", flush=True); flags.append(f"⚠️  NFCI using cached value from {nfci_date} (live FRED unavailable)")
                             nfci_observations = [{"value": nfci_value, "date": nfci_date}]
                 except Exception as e:
                     print(f"  ⚠️  Could not read NFCI cache: {e}", flush=True)
@@ -1847,7 +1883,6 @@ def get_layer9():
         # ────────────────────────────────────────────────────
         score = 0
         status = "CALM"
-        flags = []
 
         # Extract current values
         nfci_value = nfci_observations[0]["value"]
