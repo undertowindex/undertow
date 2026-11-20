@@ -8,6 +8,7 @@ import requests
 import yfinance as yf
 
 from glint_bridge import run_glint, build_glint_section
+import trend_layer
 from boardroom_research import (
     should_run_full_research, run_member_research, run_full_boardroom,
     run_glint_review, log_run,
@@ -867,6 +868,21 @@ def get_layer3e(chain=None):
 
     return {"score": score, "max": 2, "flags": flags, "data": data}
 
+def get_layer10():
+    """Trend & momentum early-warning layer. Uses ~2 years of daily closes (Yahoo
+    only - no FRED), so it keeps working when FRED is blocked on Railway. On any
+    failure it reports UNVERIFIED, which prevents a GREEN headline."""
+    try:
+        raw = yf_download_with_retry(" ".join(trend_layer.TICKERS), period="2y", interval="1d")
+        closes = raw["Close"].dropna(how="all")
+        if len(closes) < 60:
+            raise ValueError(f"only {len(closes)} days of history returned")
+        return trend_layer.build_layer10(closes)
+    except Exception as e:
+        return {"score": 0, "max": trend_layer.LAYER_MAX, "state": "UNVERIFIED", "components": 0,
+                "flags": [f"Layer 10 error: {e}"], "data": {}, "unavailable": list(trend_layer.COMPONENT_MAX)}
+
+
 CORE_LAYERS = ("Layer 1", "Layer 2", "Layer 3", "Layer 8", "Layer 9")
 _DEGRADED_MARKERS = ("error", "unavailable", "fallback", "not set", "no valid")
 
@@ -1355,7 +1371,7 @@ def build_data_quality_dashboard(l1, l2, l3, l3b, l3c, l3d, l3e, l8, l9=None):
     return html, quality_pct
 
 
-def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", glint_html="", sanity_warnings=None, final_signal_data=None, glint_review="", extra_flags=None, shadow_output="", l3b=None, l3c=None, l3d=None, l3e=None, l8=None, l9=None, layer9_html="", quality_html=""):
+def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", glint_html="", sanity_warnings=None, final_signal_data=None, glint_review="", extra_flags=None, shadow_output="", l3b=None, l3c=None, l3d=None, l3e=None, l8=None, l9=None, layer9_html="", quality_html="", trend_html=""):
     """Returns True only on a confirmed 200 from Resend. This is an
     early-warning system - a report that silently failed to send on the
     one day it mattered is worse than no report at all, so callers must
@@ -1419,6 +1435,10 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", g
 </div>
 """
 
+    trend_block = ""
+    if trend_html:
+        trend_block = f'''<div style="background: #1a1a1a; border-left: 4px solid {signal_color}; padding: 15px; margin: 20px 0; border-radius: 4px; white-space: pre-wrap; line-height: 1.6; font-family: monospace; font-size: 13px;">{trend_html}</div>'''
+
     # Generate dials dashboard if layer data is provided
     dials_html = ""
     if l3b and l3c and l3d and l3e and l8 and l9:
@@ -1437,6 +1457,7 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", g
   <h2 style="margin: 0; color: {signal_color};">Composite score: {score}/{score_data['max']} ({score_data['signal']})</h2>
   <p style="margin: 8px 0 0 0;">{score_data['summary']}</p>
 </div>
+{trend_block}
 {quality_html}
 {dials_html}
 {override_html}
@@ -1489,7 +1510,7 @@ def send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html="", g
             json={
                 "from": "Undertow Index <onboarding@resend.dev>",
                 "to": ALERT_EMAILS,
-                "subject": f"{emoji} Undertow Index — {signal} ({score}/{score_data['max']}) — {datetime.datetime.now().strftime('%d %b %Y')}",
+                "subject": f"{emoji} Undertow Index — {signal} ({score}/{score_data['max']})" + (" ⚠️ TREND WARNING" if score_data.get("trend", {}).get("state") in ("AMBER", "RED") else "") + f" — {datetime.datetime.now().strftime('%d %b %Y')}",
                 "html": html
             },
             timeout=15
@@ -2148,6 +2169,13 @@ def main():
 
     print("[Composite Score] Computing aggregate stress...")
     score_data = compute_score(l1, l2, l3, l3b, l3c, l3d, l3e, l8, l9)
+
+    print("[Layer 10] Trend & momentum (early warning)...", flush=True)
+    l10 = get_layer10()
+    print(f"  State: {l10['state']} | Score: {l10['score']}/{l10['max']} | Components verified: {l10.get('components', 0)}/{len(trend_layer.COMPONENT_MAX)}", flush=True)
+    score_data = trend_layer.apply_trend_floor(score_data, l10)
+    trend_html = trend_layer.format_layer10_for_email(l10)
+    print(trend_html, flush=True)
     print(f"\n  {score_data['emoji']} SIGNAL: {score_data['signal']} ({score_data['score']}/{score_data['max']})")
     print(f"  {score_data['summary']}")
 
@@ -2167,10 +2195,10 @@ def main():
         print(f"  ⚠️  Glint screen failed, skipping section: {e}", flush=True)
         glint_html = "💎 Glint screen unavailable today."
 
-    all_flags = l1["flags"] + l2["flags"] + l3["flags"] + l3b["flags"] + l3d["flags"] + l3e["flags"] + l8["flags"] + l9["flags"]
+    all_flags = l1["flags"] + l2["flags"] + l3["flags"] + l3b["flags"] + l3d["flags"] + l3e["flags"] + l8["flags"] + l9["flags"] + l10["flags"]
     flags_text = "\n".join(all_flags) if all_flags else "No flags raised."
     raw_data = {**l1.get("data", {}), **l2.get("data", {}), **l3.get("data", {}),
-                **l3b.get("data", {}), **l3d.get("data", {}), **l3e.get("data", {}), **l8.get("data", {}), **l9.get("data", {})}
+                **l3b.get("data", {}), **l3d.get("data", {}), **l3e.get("data", {}), **l8.get("data", {}), **l9.get("data", {}), **{f"L10_{k}": v for k, v in l10.get("data", {}).items()}}
     data_text = json.dumps(raw_data, indent=2)
 
     run_full, mode_reason = should_run_full_research(score_data["signal"])
@@ -2267,7 +2295,7 @@ def main():
     publish_ark_handoff(ark_inputs, ARK_HANDOFF_GIST_ID, GITHUB_GIST_TOKEN)
 
     print("\n[Email Report] Sending comprehensive analysis...")
-    email_sent = send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html, glint_html, sanity_warnings, final_signal_data, glint_review, extra_flags=l3b["flags"] + l3d["flags"] + l3e["flags"], shadow_output=shadow_output, l3b=l3b, l3c=l3c, l3d=l3d, l3e=l3e, l8=l8, l9=l9, layer9_html=layer9_html, quality_html=quality_html)
+    email_sent = send_email(score_data, l1, l2, l3, boardroom, trade_ideas, layer8_html, glint_html, sanity_warnings, final_signal_data, glint_review, extra_flags=l3b["flags"] + l3d["flags"] + l3e["flags"], shadow_output=shadow_output, l3b=l3b, l3c=l3c, l3d=l3d, l3e=l3e, l8=l8, l9=l9, layer9_html=layer9_html, quality_html=quality_html, trend_html=trend_html)
 
     if not email_sent:
         print("\n" + "=" * 60)

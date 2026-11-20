@@ -39,3 +39,15 @@ Set on Railway (and in `~/undertow/.env.local`, gitignored, for local manual run
 
 - **"Undertow 2.0"** — a separate, half-built rebuild prototyped via a *different* Claude session (likely Claude.ai directly, not this Code setup), running in a Claude cloud container (`/home/claude/undertow/...`), sent as manual test emails from `micah.brown7@gmail.com` between 2026-08-21 and 08-25. Broken (couldn't persist state between runs, its web-fetching was blocked). Confirmed inactive as of 2026-08-26 — no scheduled tasks exist for it. Nothing to do with this repo.
 - **"Market Vital Signs"** — a real, live, separate system built by **ChatGPT** (not Claude), also on Railway under the same `undertowindex` account but a different project (`charismatic-balance`), GitHub repo `undertowindex/market-vital-signs`. Deliberately built as a parallel/independent tool to Glint so the user can compare model outputs — don't try to merge scope or align it with this repo.
+
+## Layer 10 — Trend & Momentum early warning (added 2026-11-20, branch `layer10-trend-warning`)
+
+**Why:** Layers 1-9 were snapshots (Layer 1 pulled 5 days of prices). Nothing measured drawdowns, moving averages, tech/breadth underperformance or VIX acceleration, so the 2026-11 selloff only registered after level thresholds tripped.
+
+**What it does:** `trend_layer.py` scores 9 price-based components (SPY drawdown, SPY vs 50/200-day, VIX vs its 20-day average, QQQ vs SPY, QQQ drawdown, RSP/SPY breadth, HYG/IEF credit, 10Y yield change) from 2 years of Yahoo closes. No FRED, so it works on Railway. It can only RAISE the headline (AMBER at 3+ points, RED at 6+; held 5 trading days so a one-day bounce does not reset it). If fewer than 5 components can be verified, or the fetch fails, the headline cannot be GREEN.
+
+**Status of the numbers:** thresholds are conventional STARTING values, NOT validated. Unit tests (`python3 -I tests/test_trend_layer.py`) check the code behaves as designed, including on real SPY/VIX closes for Jun-Nov 2026. They do not validate the thresholds.
+
+**Before merging to main:** run `python3 backtest_trend.py` on a machine with internet (needs `pip install yfinance pandas numpy`). It reports lead time in each >=10% S&P decline, false-alarm rate, and whether acting on it beat buy-and-hold and a plain 200-day rule. Do not merge if it fails to beat the 200-day rule or the robustness grid is unstable.
+
+**Known open items:** Railway blocks FRED, so Layers 8 and 9 run on cached/fallback values (capped at AMBER by the data-gap rule); "Undertow 2.0" (Claude scheduled task) is a separate, weaker system and should be retired once this is live.
